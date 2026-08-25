@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.23)
 
-project(ReShadeLUTBaker VERSION 1.0.0 LANGUAGES CXX)
+project(ReShadeLUTBaker VERSION 1.0.1 LANGUAGES CXX)
 
 if(NOT WIN32)
   message(FATAL_ERROR "ReShade LUT Baker builds as a Windows ReShade add-on.")
@@ -69,6 +69,7 @@ endif()
 add_library(reshade_lut_core STATIC
   src/cube_lut.cpp
   src/cube_lut.hpp
+  src/technique_catalog.hpp
 )
 target_compile_features(reshade_lut_core PUBLIC cxx_std_17)
 target_include_directories(reshade_lut_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")

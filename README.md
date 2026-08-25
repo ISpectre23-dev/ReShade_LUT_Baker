@@ -81,7 +81,7 @@ ReShade must be installed in a configuration that permits third-party add-ons. I
 6. Select **Update preview alias** only if overwriting `ReShade_LUT_Latest.cube` is desired.
 7. Press **Export LUT**.
 
-Disabled techniques can be selected and baked without enabling them in the preset. **Select currently enabled** is only a convenience for populating the selection. The original enabled/disabled state is never modified.
+Disabled techniques can be selected and baked without enabling them in the preset. **Select currently enabled** replaces the current selection with exactly the techniques enabled in the current catalog. Once ReShade exposes an authoritative post-reload catalog, refreshes preserve still-valid selections and remove entries that no longer exist. The original enabled/disabled state is never modified.
 
 During the first attempt ReShade may need to compile the custom offscreen permutation. The baker retries for up to 60 seconds. It fails without writing a file if a selected technique disappears, compilation never completes, the execution event sequence differs, allocation/readback fails, a non-finite result is found, or the file cannot be committed.
 
@@ -148,7 +148,7 @@ The offline metrics measure values at lattice nodes. Differences at colors betwe
 
 See [BUILDING.md](BUILDING.md) for the reproducible Visual Studio 2022/CMake commands and offline dependency options. A Windows GitHub Actions workflow builds the `.addon64` and runs the C++ and Python tests.
 
-The C++ tests cover lattice dimensions/order, identity metrics, FP16 fallback conversion, filename safety and atomic non-overwriting CUBE output. Python tests cover strict parsing, ordering, identity metrics, comparison metrics and malformed-file rejection.
+The C++ tests cover technique-selection reconciliation, duplicate identity changes, select-currently-enabled semantics, lattice dimensions/order, identity metrics, FP16 fallback conversion, filename safety and atomic non-overwriting CUBE output. Python tests cover strict parsing, ordering, identity metrics, comparison metrics and malformed-file rejection.
 
 ## Technical references
 
@@ -163,4 +163,4 @@ No proprietary shader source is copied, redistributed or required.
 
 ## License
 
-No license has been selected by the repository owner yet. See [LICENSE](LICENSE). MIT is a practical recommendation for this small add-on, but the owner should make that choice before public redistribution.
+ReShade LUT Baker is available under the [MIT License](LICENSE).

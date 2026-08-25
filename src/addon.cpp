@@ -2,6 +2,7 @@
 #include <reshade.hpp>
 
 #include "cube_lut.hpp"
+#include "technique_catalog.hpp"
 #include "version.hpp"
 
 #include <Windows.h>
@@ -30,36 +31,13 @@
 namespace
 {
 using namespace reshade::api;
+using lut_baker::technique_key;
+using lut_baker::technique_selection;
 
 constexpr std::chrono::seconds permutation_timeout { 60 };
 constexpr std::chrono::seconds gpu_submission_timeout { 30 };
 constexpr std::uint64_t gpu_wait_timeout_ns = 30'000'000'000ull;
 constexpr const char *preview_alias_name = "ReShade_LUT_Latest.cube";
-
-struct technique_key
-{
-    std::string effect;
-    std::string name;
-    std::uint32_t occurrence = 0;
-    std::uint32_t occurrence_count = 1;
-
-    bool operator==(const technique_key &other) const noexcept
-    {
-        return effect == other.effect && name == other.name && occurrence == other.occurrence;
-    }
-};
-
-struct technique_key_hash
-{
-    std::size_t operator()(const technique_key &value) const noexcept
-    {
-        const std::size_t effect_hash = std::hash<std::string> {}(value.effect);
-        const std::size_t name_hash = std::hash<std::string> {}(value.name);
-        const std::size_t occurrence_hash = std::hash<std::uint32_t> {}(value.occurrence);
-        const std::size_t combined = effect_hash ^ (name_hash + 0x9e3779b9u + (effect_hash << 6) + (effect_hash >> 2));
-        return combined ^ (occurrence_hash + 0x9e3779b9u + (combined << 6) + (combined >> 2));
-    }
-};
 
 struct technique_entry
 {
@@ -139,7 +117,7 @@ struct runtime_state
     bool destroyed = false;
     bool catalog_dirty = true;
     std::vector<technique_entry> techniques;
-    std::unordered_set<technique_key, technique_key_hash> selected;
+    technique_selection selected;
 
     std::array<char, 160> output_filename {};
     std::array<char, 96> technique_filter {};
@@ -156,7 +134,7 @@ struct runtime_state
     bool identity_metrics_valid = false;
 
     bool export_pending = false;
-    std::unordered_set<technique_key, technique_key_hash> requested;
+    technique_selection requested;
     std::string normalized_filename;
     std::chrono::steady_clock::time_point request_started {};
     std::uint32_t attempts = 0;
@@ -296,19 +274,31 @@ bool refresh_catalog(runtime_state &state)
         refreshed.push_back(std::move(entry));
     });
 
-    std::unordered_map<technique_key, std::uint32_t, technique_key_hash> occurrence_counts;
+    std::unordered_map<technique_key, std::uint32_t, lut_baker::technique_key_hash> occurrence_counts;
     for (const technique_entry &entry : refreshed)
         ++occurrence_counts[entry.key];
-    std::unordered_map<technique_key, std::uint32_t, technique_key_hash> next_occurrence;
+    std::unordered_map<technique_key, std::uint32_t, lut_baker::technique_key_hash> next_occurrence;
     for (technique_entry &entry : refreshed)
     {
         entry.key.occurrence_count = occurrence_counts[entry.key];
         entry.key.occurrence = next_occurrence[entry.key]++;
     }
 
-    if (refreshed.empty() && (!state.selected.empty() || (state.export_pending && !state.requested.empty())))
+    std::vector<technique_key> refreshed_keys;
+    refreshed_keys.reserve(refreshed.size());
+    for (const technique_entry &entry : refreshed)
+        refreshed_keys.push_back(entry.key);
+
+    lut_baker::catalog_reconciliation reconciliation = lut_baker::reconcile_catalog_selection(
+        refreshed_keys,
+        state.selected,
+        state.export_pending && !state.requested.empty());
+    if (!reconciliation.accepted)
         return false;
 
+    // This is the editable selection for future exports. Never reconcile
+    // 'requested', which is the immutable snapshot of an active bake.
+    state.selected = std::move(reconciliation.selected);
     state.techniques = std::move(refreshed);
     state.catalog_dirty = false;
     return true;
@@ -510,10 +500,10 @@ bool resolve_requested_techniques(
     std::string &missing)
 {
     ordered.clear();
-    std::unordered_set<technique_key, technique_key_hash> found;
+    technique_selection found;
     for (const technique_entry &entry : state.techniques)
     {
-        if (state.requested.find(entry.key) != state.requested.end())
+        if (lut_baker::selection_contains_exact(state.requested, entry.key))
         {
             ordered.push_back(entry);
             found.insert(entry.key);
@@ -1151,13 +1141,7 @@ void draw_overlay(effect_runtime *runtime)
     ImGui::InputTextWithHint("##technique_filter", "Filter techniques", state->technique_filter.data(), state->technique_filter.size());
 
     if (ImGui::Button("Select currently enabled"))
-    {
-        for (const technique_entry &entry : state->techniques)
-        {
-            if (entry.enabled)
-                state->selected.insert(entry.key);
-        }
-    }
+        state->selected = lut_baker::select_currently_enabled(state->techniques);
     ImGui::SameLine();
     if (ImGui::Button("Clear selection"))
         state->selected.clear();

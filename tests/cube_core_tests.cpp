@@ -1,4 +1,5 @@
 #include "cube_lut.hpp"
+#include "technique_catalog.hpp"
 
 #include <cmath>
 #include <chrono>
@@ -41,6 +42,62 @@ bool same_float_bits(const float left, const float right)
 
 int main()
 {
+    using lut_baker::technique_key;
+    using lut_baker::technique_selection;
+
+    struct catalog_entry
+    {
+        technique_key key;
+        bool enabled = false;
+    };
+
+    const technique_key retained { "Current.fx", "Retained", 0, 1 };
+    const technique_key disappeared { "Previous.fx", "Gone", 0, 1 };
+    const technique_key duplicate_second { "Duplicate.fx", "SameName", 1, 2 };
+    const technique_key new_technique { "Current.fx", "New", 0, 1 };
+    const technique_selection previous_selection { retained, disappeared, duplicate_second };
+    const std::vector<technique_key> refreshed_catalog { duplicate_second, new_technique, retained };
+
+    const auto reconciled = lut_baker::reconcile_catalog_selection(refreshed_catalog, previous_selection, false);
+    expect(reconciled.accepted, "non-empty refreshed catalog is authoritative");
+    expect(reconciled.selected.size() == 2, "catalog reconciliation removes only disappeared selections");
+    expect(reconciled.selected.find(retained) != reconciled.selected.end(), "catalog reconciliation preserves an existing selection");
+    expect(reconciled.selected.find(duplicate_second) != reconciled.selected.end(), "stable duplicate ordinal remains selected");
+    expect(reconciled.selected.find(disappeared) == reconciled.selected.end(), "disappeared selection is removed");
+    expect(reconciled.selected.find(new_technique) == reconciled.selected.end(), "new catalog entries are not auto-selected");
+
+    const technique_key duplicate_after_cardinality_change { "Duplicate.fx", "SameName", 0, 1 };
+    const technique_selection ambiguous_previous { technique_key { "Duplicate.fx", "SameName", 0, 2 } };
+    expect(!lut_baker::selection_contains_exact(ambiguous_previous, duplicate_after_cardinality_change),
+        "active request lookup rejects duplicate cardinality changes");
+    expect(lut_baker::selection_contains_exact(previous_selection, duplicate_second),
+        "active request lookup accepts a stable duplicate identity");
+    const auto ambiguous = lut_baker::reconcile_catalog_selection({ duplicate_after_cardinality_change }, ambiguous_previous, false);
+    expect(ambiguous.accepted && ambiguous.selected.empty(), "duplicate cardinality changes are not ambiguously reselected");
+
+    const auto transient_empty = lut_baker::reconcile_catalog_selection({}, previous_selection, false);
+    expect(!transient_empty.accepted, "empty enumeration with a previous selection is treated as transient");
+    const auto pending_empty = lut_baker::reconcile_catalog_selection({}, {}, true);
+    expect(!pending_empty.accepted, "empty enumeration cannot replace a pending bake catalog");
+    const auto authoritative_empty = lut_baker::reconcile_catalog_selection({}, {}, false);
+    expect(authoritative_empty.accepted && authoritative_empty.selected.empty(), "empty idle catalog without selection is accepted");
+
+    technique_selection requested_snapshot = previous_selection;
+    technique_selection ui_selection = reconciled.selected;
+    expect(requested_snapshot.find(disappeared) != requested_snapshot.end(), "catalog reconciliation does not mutate an active requested snapshot");
+    expect(ui_selection.find(disappeared) == ui_selection.end(), "future UI selection is reconciled independently of requested snapshot");
+
+    const std::vector<catalog_entry> enabled_catalog {
+        { retained, true },
+        { new_technique, false }
+    };
+    technique_selection enabled_selection { disappeared, new_technique };
+    enabled_selection = lut_baker::select_currently_enabled(enabled_catalog);
+    expect(enabled_selection.size() == 1 && enabled_selection.find(retained) != enabled_selection.end(),
+        "Select currently enabled replaces the selection with exactly enabled techniques");
+    expect(enabled_selection.find(disappeared) == enabled_selection.end() && enabled_selection.find(new_technique) == enabled_selection.end(),
+        "Select currently enabled does not accumulate stale or disabled selections");
+
     const auto layout = lut_baker::choose_lattice_layout(64);
     expect(layout.first == 512 && layout.second == 512, "64^3 must use a 512 x 512 texture");
 

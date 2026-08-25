@@ -53,10 +53,4 @@ struct cube_metadata
     const cube_metadata &metadata,
     bool overwrite,
     std::string &error);
-
-[[nodiscard]] bool copy_file_atomic(
-    const std::filesystem::path &source,
-    const std::filesystem::path &destination,
-    bool overwrite,
-    std::string &error);
 }

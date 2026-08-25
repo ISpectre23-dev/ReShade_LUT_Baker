@@ -37,7 +37,6 @@ using lut_baker::technique_selection;
 constexpr std::chrono::seconds permutation_timeout { 60 };
 constexpr std::chrono::seconds gpu_submission_timeout { 30 };
 constexpr std::uint64_t gpu_wait_timeout_ns = 30'000'000'000ull;
-constexpr const char *preview_alias_name = "ReShade_LUT_Latest.cube";
 
 struct technique_entry
 {
@@ -88,10 +87,8 @@ struct gpu_resources
 struct export_job
 {
     std::filesystem::path destination;
-    std::filesystem::path preview_alias;
     std::uint32_t lattice_size = 0;
     std::size_t technique_count = 0;
-    bool update_preview_alias = false;
     bool identity = false;
     std::vector<lut_baker::float4> samples;
     lut_baker::cube_metadata metadata;
@@ -122,7 +119,6 @@ struct runtime_state
     std::array<char, 160> output_filename {};
     std::array<char, 96> technique_filter {};
     std::uint32_t lattice_size = 64;
-    bool update_preview_alias = false;
 
     operation_phase phase = operation_phase::ready;
     std::string status = "Ready";
@@ -619,13 +615,6 @@ export_result execute_export_job(export_job job) noexcept
             return result;
         }
 
-        if (job.update_preview_alias && !lut_baker::copy_file_atomic(job.destination, job.preview_alias, true, error))
-        {
-            if (!result.warning.empty())
-                result.warning += ' ';
-            result.warning += "The primary LUT was exported, but the preview alias was not updated: " + error;
-        }
-
         result.success = true;
     }
     catch (const std::exception &exception)
@@ -691,10 +680,8 @@ void start_export_writer(runtime_state &state, const std::vector<technique_key> 
 
     export_job job;
     job.destination = destination;
-    job.preview_alias = directory / preview_alias_name;
     job.lattice_size = state.lattice_size;
     job.technique_count = ordered.size();
-    job.update_preview_alias = state.update_preview_alias;
     job.identity = ordered.empty();
     job.samples = std::move(samples);
     job.metadata = std::move(metadata);
@@ -1133,7 +1120,6 @@ void draw_overlay(effect_runtime *runtime)
 
     ImGui::SetNextItemWidth(-1.0f);
     ImGui::InputTextWithHint("Output filename", "automatic timestamp", state->output_filename.data(), state->output_filename.size());
-    ImGui::Checkbox("Update preview alias (explicitly overwrites ReShade_LUT_Latest.cube)", &state->update_preview_alias);
 
     ImGui::Spacing();
     ImGui::TextUnformatted("Techniques to bake (real ReShade order)");

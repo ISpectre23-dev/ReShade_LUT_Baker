@@ -1,11 +1,12 @@
 // ReShade LUT Baker companion preview shader.
 //
 // The CUBE file must use a 0..1 input domain and its LUT_3D_SIZE must match
-// LUT_BAKER_CUBE_SIZE. Add the file's directory to ReShade's texture search
-// paths, then reload effects after exporting a new LUT.
+// LUT_BAKER_CUBE_SIZE. Define LUT_BAKER_CUBE_FILENAME as the quoted basename
+// of a specific export, add its directory to ReShade's texture search paths,
+// then reload effects.
 
 #ifndef LUT_BAKER_CUBE_FILENAME
-#define LUT_BAKER_CUBE_FILENAME "ReShade_LUT_Latest.cube"
+#define LUT_BAKER_CUBE_FILENAME "LUT_Name.cube"
 #endif
 
 #ifndef LUT_BAKER_CUBE_SIZE
@@ -13,7 +14,7 @@
 #endif
 
 #if LUT_BAKER_CUBE_SIZE < 2
-#error LUT_BAKER_CUBE_SIZE must be at least 2.
+#error "LUT_BAKER_CUBE_SIZE must be at least 2."
 #endif
 
 #include "ReShade.fxh"
@@ -168,7 +169,14 @@ float4 LUTBakerPreviewPS(float4 position : SV_Position, float2 texcoord : TEXCOO
 	float3 output = graded;
 
 	if (LUTBakerPreviewMode == 1)
-		output = texcoord.x < LUTBakerSplitPosition ? input.rgb : graded;
+	{
+		const float split_x = saturate(LUTBakerSplitPosition) * float(BUFFER_WIDTH);
+		output = position.x < split_x ? input.rgb : graded;
+
+		// One-screen-pixel box-filtered divider, centered on the exact split.
+		const float divider_coverage = saturate(1.0 - abs(position.x - split_x));
+		output = lerp(output, float3(1.0, 1.0, 1.0), divider_coverage);
+	}
 	else if (LUTBakerPreviewMode == 2)
 		output = abs(input.rgb - graded) * LUTBakerDifferenceGain;
 
@@ -177,7 +185,7 @@ float4 LUTBakerPreviewPS(float4 position : SV_Position, float2 texcoord : TEXCOO
 
 technique ReShadeLUTPreview <
 	ui_label = "ReShade LUT Preview";
-	ui_tooltip = "Loads the latest ReShade LUT Baker CUBE file as a native FP32 3D texture.";
+	ui_tooltip = "Loads the explicitly configured ReShade LUT Baker CUBE file as a native FP32 3D texture.";
 >
 {
 	pass

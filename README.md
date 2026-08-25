@@ -78,8 +78,7 @@ ReShade must be installed in a configuration that permits third-party add-ons. I
 3. Leave **LUT Size** at 64 unless a smaller test LUT is intentional.
 4. Select exactly the techniques to bake. The list is displayed in ReShade execution order.
 5. Optionally enter a filename. An empty field creates `ReShade_LUT_YYYYMMDD_HHMMSS.cube`.
-6. Select **Update preview alias** only if overwriting `ReShade_LUT_Latest.cube` is desired.
-7. Press **Export LUT**.
+6. Press **Export LUT**.
 
 Disabled techniques can be selected and baked without enabling them in the preset. **Select currently enabled** replaces the current selection with exactly the techniques enabled in the current catalog. Once ReShade exposes an authoritative post-reload catalog, refreshes preserve still-valid selections and remove entries that no longer exist. The original enabled/disabled state is never modified.
 
@@ -93,7 +92,7 @@ Files are written under:
 <ReShade base directory>/LUT_Bakes/
 ```
 
-Existing named exports are not overwritten. A numeric suffix is added instead. The optional `ReShade_LUT_Latest.cube` preview alias is the only intentional overwrite and is disabled by default.
+Existing named exports are not overwritten. A numeric suffix is added instead. The baker writes only the requested/generated export and never creates an additional alias or automatic copy.
 
 Each export contains:
 
@@ -109,17 +108,18 @@ Rows use standard CUBE order with red changing fastest, then green, then blue. T
 
 ## Companion preview shader
 
-[`shaders/ReShadeLUTPreview.fx`](shaders/ReShadeLUTPreview.fx) loads the optional `ReShade_LUT_Latest.cube` alias as a native RGBA32F 3D texture. It offers tetrahedral and trilinear interpolation plus apply, split and absolute input-to-LUT difference views.
+[`shaders/ReShadeLUTPreview.fx`](shaders/ReShadeLUTPreview.fx) loads a specifically configured exported CUBE as a native RGBA32F 3D texture. It offers tetrahedral and trilinear interpolation plus apply, split and absolute input-to-LUT difference views. Split mode includes a one-screen-pixel divider that follows the comparison boundary.
 
 To use it:
 
 1. Copy the shader into an Effect Search Path.
 2. Add `LUT_Bakes` to ReShade's Texture Search Paths.
-3. Enable **Update preview alias** for the export.
-4. Reload effects after exporting because ReShade does not hot-reload changed 3D texture files.
-5. Disable the original grading techniques and enable `ReShadeLUTPreview` to inspect the generated LUT on normal game content.
+3. Change `LUT_BAKER_CUBE_FILENAME` to the quoted basename of the exact export to load, for example `LUT_BAKER_CUBE_FILENAME="ReShade_LUT_20260825_120000.cube"`. Edit the fallback definition near the top of the shader or override it through ReShade's preprocessor definitions.
+4. Set `LUT_BAKER_CUBE_SIZE` to the exported size if it is not 64.
+5. Reload effects after changing the filename or replacing the CUBE because ReShade does not hot-reload changed 3D texture files.
+6. Disable the original grading techniques and enable `ReShadeLUTPreview` to inspect the generated LUT on normal game content.
 
-The shader defaults to a 64^3 alias. If a 16^3 or 32^3 LUT is exported, change `LUT_BAKER_CUBE_SIZE` through ReShade's preprocessor definitions or in the shader and reload effects. `LUT_BAKER_CUBE_FILENAME` can similarly select another lowercase `.cube` filename.
+The shader uses `LUT_Name.cube` as a clear placeholder filename and defaults to a 64^3 texture. The placeholder is not created or managed by the baker; point `LUT_BAKER_CUBE_FILENAME` at a lowercase `.cube` file explicitly.
 
 The absolute-difference mode shows the magnitude of the LUT's change relative to its own input. It is not a simultaneous pixel-perfect comparison against a separate live grading chain.
 

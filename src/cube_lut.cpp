@@ -443,31 +443,4 @@ bool write_cube_atomic(
 
     return install_temp_file(temporary, destination, overwrite, error);
 }
-
-bool copy_file_atomic(
-    const std::filesystem::path &source,
-    const std::filesystem::path &destination,
-    const bool overwrite,
-    std::string &error)
-{
-    std::error_code filesystem_error;
-    if (!destination.parent_path().empty())
-        std::filesystem::create_directories(destination.parent_path(), filesystem_error);
-    if (filesystem_error)
-    {
-        error = "Unable to create the destination directory: " + filesystem_error.message();
-        return false;
-    }
-
-    const std::filesystem::path temporary = make_temp_path(destination);
-    if (!std::filesystem::copy_file(source, temporary, std::filesystem::copy_options::none, filesystem_error))
-    {
-        std::error_code ignored;
-        std::filesystem::remove(temporary, ignored);
-        error = "Unable to stage the preview alias: " + filesystem_error.message();
-        return false;
-    }
-
-    return install_temp_file(temporary, destination, overwrite, error);
-}
 }

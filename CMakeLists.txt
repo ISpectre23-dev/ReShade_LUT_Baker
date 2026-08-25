@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.23)
 
-project(ReShadeLUTBaker VERSION 1.0.1 LANGUAGES CXX)
+project(ReShadeLUTBaker VERSION 1.0.2 LANGUAGES CXX)
 
 if(NOT WIN32)
   message(FATAL_ERROR "ReShade LUT Baker builds as a Windows ReShade add-on.")

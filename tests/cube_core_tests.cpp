@@ -166,9 +166,6 @@ int main()
     expect(std::filesystem::exists(output), "CUBE output exists");
     expect(!lut_baker::write_cube_atomic(output, 64, identity, metadata, false, error), "CUBE writer does not overwrite by default");
     expect(lut_baker::make_unique_output_path(test_directory, "identity.cube").filename() == "identity_001.cube", "existing exports receive a non-overwriting numeric suffix");
-    const std::filesystem::path alias = test_directory / "latest.cube";
-    expect(lut_baker::copy_file_atomic(output, alias, true, error), "preview alias copy succeeds");
-    expect(lut_baker::copy_file_atomic(output, alias, true, error), "preview alias overwrite is explicit and repeatable");
 
     auto non_finite = identity;
     non_finite[7].g = std::numeric_limits<float>::quiet_NaN();

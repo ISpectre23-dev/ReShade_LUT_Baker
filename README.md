@@ -45,10 +45,10 @@ The baker deliberately does not attempt to classify shaders automatically. The s
 ## Requirements
 
 - Windows x64
-- ReShade 6.8.0 with full add-on support
+- ReShade 6.8.0 with full add-on support or newer*
 - A renderer supported by ReShade whose graphics queue can render/copy RGBA32F or RGBA16F textures and create a completion fence
 
-The implementation targets ReShade add-on API 20 and is audited and compiled against the official ReShade 6.8.0 source. Newer ReShade versions are expected to work while they remain API-compatible, but future compatibility is not guaranteed. Older versions are not supported.
+*The implementation targets ReShade add-on API 20 and is audited and compiled against the official ReShade 6.8.0 source. Newer ReShade versions are expected to work while they remain API-compatible, but future compatibility is not guaranteed. Older versions are not supported.
 
 ## Installation
 

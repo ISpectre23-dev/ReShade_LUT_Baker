@@ -68,12 +68,14 @@ The optional preview shader can be copied into any configured ReShade Effect Sea
 
 1. Configure the grading techniques and their uniforms as desired.
 2. Open **Add-ons > ReShade LUT Baker**.
-3. Select exactly the techniques to bake. They are shown in ReShade execution order.
-4. In **Export**, choose **Output format**. CUBE defaults to 64³ with 16³/32³ available. Monster Hunter Rise automatically uses 32³; switching back preserves the CUBE size preference.
-5. Optionally enter an output basename or complete matching suffix. Leaving the field empty creates `ReShade_LUT_YYYYMMDD_HHMMSS.cube` or `.tex.28`, depending on the format.
-6. Press **Export LUT**.
+3. Under **Techniques**, tick exactly the techniques to bake (click the checkbox or anywhere on the row). They are listed in ReShade execution order; the **Live** dot shows whether each one is currently enabled in ReShade.
+4. Under **Output**, choose the **Format**. CUBE defaults to 64x64x64 with 16x16x16/32x32x32 available. Monster Hunter Rise always uses 32x32x32; switching back preserves the CUBE size preference.
+5. Optionally enter a **File name** (basename or complete matching suffix). The line below the field shows the exact name that will be written. Leaving it empty creates `ReShade_LUT_YYYYMMDD_HHMMSS.cube` or `.tex.28`, depending on the format.
+6. Press the bake button. Its label states what will be written, for example **Bake 3 techniques - CUBE 64x64x64**. With nothing selected it reads **Export identity LUT (GPU validation)**.
 
-**Select currently enabled** replaces the current selection with exactly the techniques that are enabled at that moment.
+**Use enabled** replaces the current selection with exactly the techniques that are enabled at that moment, **Clear** deselects everything and **Refresh** re-reads the technique list. The filter field narrows the list by effect or technique name without changing the selection.
+
+While a bake runs, the settings are locked and a progress bar shows the current step. The **Result** section then reports the written file, format, technique count and duration, any warnings and validation metrics, with **Open output folder** and **Copy file name** (handy for `ReShadeLUTPreview.fx`). The accuracy limitations are listed under **How it works and limitations**.
 
 After effects are reloaded, valid selections are preserved and techniques that no longer exist are removed automatically. An active bake keeps its own immutable selection snapshot, so a later catalog refresh cannot silently change the requested export.
 

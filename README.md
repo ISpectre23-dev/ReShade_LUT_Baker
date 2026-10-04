@@ -69,7 +69,7 @@ The optional preview shader can be copied into any configured ReShade Effect Sea
 1. Configure the grading techniques and their uniforms as desired.
 2. Open **Add-ons > ReShade LUT Baker**.
 3. Under **Techniques**, tick exactly the techniques to bake (click the checkbox or anywhere on the row). They are listed in ReShade execution order; the **Live** dot shows whether each one is currently enabled in ReShade.
-4. Under **Output**, choose the **Format**. CUBE defaults to 64x64x64 with 16x16x16/32x32x32 available. Monster Hunter Rise always uses 32x32x32; switching back preserves the CUBE size preference.
+4. Under **Output**, pick the **Format** from the dropdown. CUBE defaults to 64x64x64 with 16x16x16/32x32x32 available. Monster Hunter Rise always uses 32x32x32; switching back preserves the CUBE size preference.
 5. Optionally enter a **File name** (basename or complete matching suffix). The line below the field shows the exact name that will be written. Leaving it empty creates `ReShade_LUT_YYYYMMDD_HHMMSS.cube` or `.tex.28`, depending on the format.
 6. Press the bake button. Its label states what will be written, for example **Bake 3 techniques - CUBE 64x64x64**. With nothing selected it reads **Export identity LUT (GPU validation)**.
 

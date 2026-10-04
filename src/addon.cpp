@@ -1330,6 +1330,29 @@ void draw_technique_list(runtime_state &state)
     }
 }
 
+// Add new targets here; the Format dropdown is generated from this list.
+struct output_format_option
+{
+    lut_baker::output_format format;
+    const char *name;
+    const char *short_name; // Used on the bake button.
+    const char *extension;
+    const char *description;
+};
+
+const output_format_option format_options[] = {
+    { lut_baker::output_format::cube, "CUBE", "CUBE", ".cube", "Standard 3D LUT. 16, 32 or 64 points per axis, full float precision. Loadable by ReShadeLUTPreview.fx." },
+    { lut_baker::output_format::rise_tex, "Monster Hunter Rise", "Rise TEX", ".tex.28", "Native Rise TEX28 LUT. Always 32x32x32 with 8 bits per RGB channel." },
+};
+
+const output_format_option &find_format_option(const lut_baker::output_format format)
+{
+    for (const output_format_option &option : format_options)
+        if (option.format == format)
+            return option;
+    return format_options[0];
+}
+
 void set_output_format(runtime_state &state, const lut_baker::output_format next)
 {
     if (next == state.preferences.format)
@@ -1348,19 +1371,24 @@ void draw_output_settings(runtime_state &state)
     ImGui::SeparatorText("Output");
 
     field_label("Format");
-    if (ImGui::RadioButton("CUBE (.cube)", state.preferences.format == lut_baker::output_format::cube))
-        set_output_format(state, lut_baker::output_format::cube);
-    // Wrap under the first option instead of clipping in a narrow overlay.
-    const char *const rise_label = "Monster Hunter Rise (.tex.28)";
-    const float rise_width = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize(rise_label).x;
-    ImGui::SameLine();
-    if (ImGui::GetContentRegionAvail().x < rise_width)
+    const output_format_option *const current = &find_format_option(state.preferences.format);
+    const std::string preview = std::string(current->name) + "  (" + current->extension + ')';
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::BeginCombo("##output_format", preview.c_str()))
     {
-        ImGui::NewLine();
-        skip_field_label();
+        for (const output_format_option &option : format_options)
+        {
+            const bool selected = option.format == state.preferences.format;
+            if (ImGui::Selectable(option.name, selected))
+                set_output_format(state, option.format);
+            if (selected)
+                ImGui::SetItemDefaultFocus();
+            ImGui::SetItemTooltip("%s", option.description);
+            ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - ImGui::CalcTextSize(option.extension).x);
+            ImGui::TextDisabled("%s", option.extension);
+        }
+        ImGui::EndCombo();
     }
-    if (ImGui::RadioButton(rise_label, state.preferences.format == lut_baker::output_format::rise_tex))
-        set_output_format(state, lut_baker::output_format::rise_tex);
 
     field_label("LUT size");
     if (state.preferences.format == lut_baker::output_format::cube)
@@ -1428,7 +1456,7 @@ void draw_export_button(runtime_state &state)
 {
     const lut_baker::output_format format = state.preferences.format;
     const std::uint32_t size = lut_baker::effective_lattice_size(state.preferences);
-    const std::string target = std::string(format == lut_baker::output_format::cube ? "CUBE" : "Rise TEX") + ' ' + lattice_label(size);
+    const std::string target = std::string(find_format_option(format).short_name) + ' ' + lattice_label(size);
 
     std::string label;
     if (state.selected.empty())

@@ -70,6 +70,7 @@ endif()
 add_library(reshade_lut_core STATIC
   src/atomic_output.cpp
   src/atomic_output.hpp
+  src/bake_control.hpp
   src/cube_lut.cpp
   src/cube_lut.hpp
   src/export_settings.cpp
@@ -118,6 +119,13 @@ if(BUILD_TESTING)
     target_compile_options(cube_core_tests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
   endif()
   add_test(NAME cube_core_tests COMMAND cube_core_tests)
+
+  add_executable(bake_control_tests tests/bake_control_tests.cpp)
+  target_link_libraries(bake_control_tests PRIVATE reshade_lut_core)
+  if(MSVC)
+    target_compile_options(bake_control_tests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
+  endif()
+  add_test(NAME bake_control_tests COMMAND bake_control_tests)
 
   add_executable(rise_tex_tests tests/rise_tex_tests.cpp)
   target_link_libraries(rise_tex_tests PRIVATE reshade_lut_core)

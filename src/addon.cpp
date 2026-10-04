@@ -1,6 +1,7 @@
 #include <imgui.h>
 #include <reshade.hpp>
 
+#include "bake_control.hpp"
 #include "cube_lut.hpp"
 #include "rise_tex.hpp"
 #include "technique_catalog.hpp"
@@ -38,7 +39,6 @@ using namespace reshade::api;
 using lut_baker::technique_key;
 using lut_baker::technique_selection;
 
-constexpr std::chrono::seconds permutation_timeout { 60 };
 constexpr std::chrono::seconds gpu_submission_timeout { 30 };
 constexpr std::uint64_t gpu_wait_timeout_ns = 30'000'000'000ull;
 
@@ -58,6 +58,7 @@ enum class operation_phase
     reading,
     writing,
     success,
+    cancelled,
     error
 };
 
@@ -147,6 +148,8 @@ struct runtime_state
     lut_baker::export_request request;
     std::chrono::steady_clock::time_point request_started {};
     std::uint32_t attempts = 0;
+    lut_baker::bake_control bake_control;
+    std::uint64_t reload_generation = 0;
 
     bool capture_execution_events = false;
     command_list *capture_command_list = nullptr;
@@ -494,6 +497,7 @@ bool ensure_gpu_resources(runtime_state &state, std::string &error)
 
 void set_failure(runtime_state &state, const std::string &message)
 {
+    state.bake_control.stop();
     state.export_pending = false;
     state.capture_execution_events = false;
     state.phase = operation_phase::error;
@@ -501,6 +505,38 @@ void set_failure(runtime_state &state, const std::string &message)
     state.detail = message;
     state.last_duration_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - state.request_started).count();
     log_message(reshade::log::level::error, message);
+}
+
+void check_bake_timeout(runtime_state &state)
+{
+    // Check independently of the submission/reload branches (and from the UI
+    // too, if this runtime stops receiving matching finish_present callbacks).
+    // A validated CPU writer is intentionally outside the compilation deadline.
+    if (state.export_pending && !state.writer_pending &&
+        state.bake_control.timed_out(std::chrono::steady_clock::now()))
+    {
+        std::string message = "Timed out waiting for the offscreen bake. No LUT was written. Check ReShade.log for shader errors.";
+        if (state.bake_control.waiting())
+            message += " Waiting technique: " + technique_label(state.bake_control.waiting_key()) + '.';
+        set_failure(state, message);
+    }
+}
+
+void abort_export(runtime_state &state)
+{
+    if (!lut_baker::can_abort_export(state.export_pending, state.writer_pending))
+        return;
+    state.bake_control.stop();
+    state.export_pending = false;
+    state.capture_execution_events = false;
+    state.phase = operation_phase::cancelled;
+    state.status = "Export cancelled";
+    state.detail = "No LUT was written. Already queued ReShade compilation cannot be interrupted by the add-on.";
+    if (state.submission_pending)
+        state.detail += " Submitted GPU work will drain through its fence before another export is allowed.";
+    state.last_duration_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - state.request_started).count();
+    // Leave request/requested and all submission/fence/resource state intact.
+    log_message(reshade::log::level::info, state.status + ". " + state.detail);
 }
 
 bool resolve_requested_techniques(
@@ -762,6 +798,7 @@ bool poll_export_writer(runtime_state &state)
         return true;
     }
 
+    state.bake_control.stop();
     state.export_pending = false;
     state.phase = operation_phase::success;
     state.status = result.identity ? "Identity LUT exported and verified" : "LUT exported";
@@ -798,6 +835,17 @@ bool poll_export_writer(runtime_state &state)
     return true;
 }
 
+// Submit, compilation and fence polling share one stable progress label.
+void set_compile_progress(runtime_state &state)
+{
+    std::ostringstream status;
+    status << "Compiling shaders (attempt " << state.attempts << ')';
+    state.status = status.str();
+    state.detail = "Waiting for ReShade to finish loading the offscreen permutation. No file is written until every selected technique runs in the expected order.";
+    if (state.bake_control.waiting())
+        state.detail += " Technique: " + technique_label(state.bake_control.waiting_key());
+}
+
 void process_bake(runtime_state &state, command_queue *present_queue)
 {
     std::lock_guard<std::recursive_mutex> lock(state.mutex);
@@ -806,6 +854,8 @@ void process_bake(runtime_state &state, command_queue *present_queue)
 
     if (poll_export_writer(state))
         return;
+
+    check_bake_timeout(state);
 
     if (state.submission_pending)
     {
@@ -816,7 +866,10 @@ void process_bake(runtime_state &state, command_queue *present_queue)
             else if (state.export_pending)
             {
                 state.phase = operation_phase::waiting_gpu;
-                state.status = state.submission_has_result ? "Waiting for FP readback" : "Waiting for permutation attempt";
+                if (state.submission_has_result)
+                    state.status = "Waiting for FP readback";
+                else
+                    set_compile_progress(state);
             }
             return;
         }
@@ -834,25 +887,23 @@ void process_bake(runtime_state &state, command_queue *present_queue)
         if (has_result)
         {
             state.phase = operation_phase::reading;
-            state.status = "Reading FP result and writing CUBE";
+            state.status = std::string("Reading FP result for ") + lut_baker::output_format_name(state.request.format);
             start_export_writer(state, completed_techniques);
             return;
         }
 
         state.phase = operation_phase::compiling;
-        std::ostringstream status;
-        status << "Offscreen permutation retry ready (attempt " << state.attempts << ')';
-        state.status = status.str();
-        state.detail = "The next presented frame will retry every selected technique from a fresh identity lattice.";
+        set_compile_progress(state);
         return;
     }
 
     if (!state.export_pending)
         return;
 
-    if (std::chrono::steady_clock::now() - state.request_started > permutation_timeout)
+    if (!state.bake_control.can_attempt(state.reload_generation))
     {
-        set_failure(state, "Timed out waiting for every selected technique to compile and execute on the offscreen FP permutation. Check ReShade.log for shader errors.");
+        state.phase = operation_phase::compiling;
+        set_compile_progress(state);
         return;
     }
 
@@ -863,7 +914,9 @@ void process_bake(runtime_state &state, command_queue *present_queue)
         return;
     }
 
-    if (state.catalog_dirty && !refresh_catalog(state))
+    // Enumeration is empty while ReShade is loading. Refresh before touching
+    // handles on EACH real attempt, including the post-compilation verification.
+    if (!refresh_catalog(state))
     {
         state.phase = operation_phase::compiling;
         state.status = "Waiting for ReShade effect reload";
@@ -896,6 +949,8 @@ void process_bake(runtime_state &state, command_queue *present_queue)
     command_list->copy_texture_region(state.gpu.identity, 0, nullptr, state.gpu.target, 0, nullptr);
     command_list->barrier(state.gpu.target, resource_usage::copy_dest, resource_usage::render_target);
 
+    state.bake_control.begin_attempt();
+    const std::uint64_t attempt_reload_generation = state.reload_generation;
     state.capture_execution_events = true;
     state.capture_command_list = command_list;
     state.capture_rtv = state.gpu.target_rtv;
@@ -905,8 +960,19 @@ void process_bake(runtime_state &state, command_queue *present_queue)
     state.execution_index = 0;
     state.execution_mismatch = false;
 
+    const technique_entry *not_rendered = nullptr;
     for (const technique_entry &entry : ordered)
+    {
+        const std::size_t before = state.execution_index;
         state.runtime->render_technique(entry.handle, command_list, state.gpu.target_rtv, state.gpu.target_rtv);
+        // Stop at the first missing event. Later techniques must never run on
+        // a partial chain or enqueue more compilation while ReShade is loading.
+        if (state.execution_mismatch || state.execution_index != before + 1)
+        {
+            not_rendered = &entry;
+            break;
+        }
+    }
 
     state.capture_execution_events = false;
     ++state.attempts;
@@ -918,11 +984,22 @@ void process_bake(runtime_state &state, command_queue *present_queue)
             set_failure(state, error);
             return;
         }
+        if (state.execution_mismatch || not_rendered == nullptr)
+        {
+            set_failure(state, "The offscreen technique execution sequence did not match ReShade's selected order. No LUT was written.");
+            return;
+        }
+        if (!state.bake_control.wait_for_compilation(not_rendered->key, attempt_reload_generation))
+        {
+            set_failure(state, "A selected technique still did not execute after ReShade finished loading its offscreen permutation: " +
+                technique_label(not_rendered->key) + ". The shader may fail to compile or exclude its technique/uniforms for the FP buffer. "
+                "No LUT was written and no further retries will be submitted. Check ReShade.log; the gameplay preset was not changed by the baker.");
+            return;
+        }
+        log_message(reshade::log::level::info, "Waiting for offscreen compilation of " + technique_label(not_rendered->key) +
+            "; verification will resume only after ReShade's effects-reloaded event.");
         state.phase = operation_phase::waiting_gpu;
-        std::ostringstream status;
-        status << "Compiling offscreen permutation (attempt " << state.attempts << ')';
-        state.status = status.str();
-        state.detail = "No file will be exported until every selected technique emits the expected render event in exact order.";
+        set_compile_progress(state);
         return;
     }
 
@@ -941,7 +1018,7 @@ void process_bake(runtime_state &state, command_queue *present_queue)
     }
     state.phase = operation_phase::waiting_gpu;
     state.status = "Waiting for FP readback";
-    state.detail = "GPU work was submitted asynchronously; the CUBE will be written after its completion fence is observed.";
+    state.detail = "GPU work was submitted asynchronously; the LUT will be written after its completion fence is observed.";
 }
 
 void begin_export(runtime_state &state)
@@ -976,6 +1053,9 @@ void begin_export(runtime_state &state)
     state.rise_metrics_valid = false;
     state.request_started = std::chrono::steady_clock::now();
     state.attempts = 0;
+    state.bake_control.start(state.request_started);
+    log_message(reshade::log::level::info, "Queued " + std::string(lut_baker::output_format_name(state.request.format)) +
+        " " + std::to_string(state.request.lattice_size) + "^3 bake of " + std::to_string(state.requested.size()) + " technique(s).");
 }
 
 void update_source_snapshot(runtime_state &state, swapchain *swapchain)
@@ -1064,6 +1144,7 @@ void on_destroy_effect_runtime(effect_runtime *runtime)
 
     std::lock_guard<std::recursive_mutex> lock(state->mutex);
     state->destroyed = true;
+    state->bake_control.stop();
     state->export_pending = false;
     state->capture_execution_events = false;
     // ReShade invokes this callback from runtime reset after it has idled the
@@ -1078,6 +1159,7 @@ void on_reloaded_effects(effect_runtime *runtime)
     if (state == nullptr)
         return;
     std::lock_guard<std::recursive_mutex> lock(state->mutex);
+    ++state->reload_generation;
     state->catalog_dirty = true;
 }
 
@@ -1476,7 +1558,7 @@ void draw_export_button(runtime_state &state)
         ImGui::SetItemTooltip("Nothing is selected, so this writes an identity LUT and verifies the GPU round trip.");
 }
 
-void draw_progress(const runtime_state &state)
+void draw_progress(runtime_state &state)
 {
     ImGui::Spacing();
     // A negative fraction draws ImGui's indeterminate animation: the number of
@@ -1484,6 +1566,13 @@ void draw_progress(const runtime_state &state)
     ImGui::PushStyleColor(ImGuiCol_PlotHistogram, color_busy);
     ImGui::ProgressBar(-1.0f * static_cast<float>(ImGui::GetTime()), ImVec2(-FLT_MIN, ImGui::GetFrameHeight() * 1.6f), state.status.c_str());
     ImGui::PopStyleColor();
+    ImGui::BeginDisabled(!lut_baker::can_abort_export(state.export_pending, state.writer_pending));
+    if (ImGui::Button("Abort export"))
+        abort_export(state);
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip(state.writer_pending
+        ? "The validated result is already being written. Cancellation is available before file writing starts."
+        : "Stop this bake without writing a LUT. Already submitted GPU work and ReShade compilation must finish safely.");
 }
 
 void metric_row(const char *label, const char *format, ...)
@@ -1504,7 +1593,12 @@ void draw_result(runtime_state &state)
         return;
 
     ImGui::SeparatorText("Result");
-    if (is_busy(state))
+    if (state.phase == operation_phase::cancelled)
+    {
+        ImGui::TextColored(color_warning, "%s", state.status.c_str());
+        ImGui::TextWrapped("%s", state.detail.c_str());
+    }
+    else if (is_busy(state))
     {
         if (!state.detail.empty())
             ImGui::TextWrapped("%s", state.detail.c_str());
@@ -1593,6 +1687,7 @@ void draw_overlay(effect_runtime *runtime)
     }
 
     std::lock_guard<std::recursive_mutex> lock(state->mutex);
+    check_bake_timeout(*state);
     if (state->catalog_dirty && !state->export_pending)
         refresh_catalog(*state);
 
@@ -1638,6 +1733,7 @@ void unregister_callbacks()
 }
 
 extern "C" __declspec(dllexport) const char *NAME = "ReShade LUT Baker";
+extern "C" __declspec(dllexport) const char *AUTHOR = "ISpectre23";
 extern "C" __declspec(dllexport) const char *DESCRIPTION = "Bakes selected ReShade techniques in floating point and exports CUBE or native Monster Hunter Rise TEX LUTs.";
 
 BOOL APIENTRY DllMain(HMODULE module, const DWORD reason, LPVOID)

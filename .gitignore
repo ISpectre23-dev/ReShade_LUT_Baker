@@ -23,6 +23,7 @@ CMakeUserPresets.json
 # Generated LUTs and validation caches
 /LUT_Bakes/
 *.cube
+*.tex.28
 __pycache__/
 *.py[cod]
 

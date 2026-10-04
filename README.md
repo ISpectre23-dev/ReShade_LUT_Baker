@@ -2,6 +2,8 @@
 
 ReShade LUT Baker is a ReShade add-on that exports the combined RGB transformation of selected techniques as a floating-point 3D `.cube` LUT.
 
+Version **1.1.0** also exports native **Monster Hunter Rise `.tex.28`** LUTs directly from the same floating-point bake. CUBE remains the default; Rise uses a fixed 32³ lattice and quantizes only the final CPU output to 8-bit RGB. Native loading and visual SDR/HDR equivalence of these new exports still require in-game testing.
+
 It evaluates a neutral RGB lattice directly through ReShade, preserving the real technique execution order and avoiding screenshot, PNG, DDS, or other image intermediates. The default export is a 64³ LUT containing 262,144 RGB samples.
 
 Selected techniques can be baked whether they are currently enabled or disabled. The baker executes them directly and does not change the preset or the user's enabled technique states.
@@ -11,11 +13,12 @@ An optional companion shader, [`ReShadeLUTPreview.fx`](shaders/ReShadeLUTPreview
 ## Features
 
 - Exports standard floating-point `.cube` 3D LUT files.
+- Exports the verified Monster Hunter Rise 32³ RGBA8 `.tex.28` profile directly, without a converter or image intermediary.
 - 64³ output by default, with 16³ and 32³ also available.
 - Uses ReShade's actual relative technique order.
 - Supports baking selected techniques without changing their enabled state.
 - Uses an RGBA32F bake target when available, with RGBA16F as an explicit fallback.
-- Preserves finite shader output below 0 and above 1 instead of clamping it before export.
+- Preserves finite shader output below 0 and above 1 in CUBE; Rise rejects it unless explicit clipping is enabled.
 - Verifies the expected ReShade technique execution sequence before writing a LUT.
 - Uses GPU completion fences before readback.
 - Writes LUT files atomically and never overwrites an existing named export.
@@ -65,9 +68,9 @@ The optional preview shader can be copied into any configured ReShade Effect Sea
 
 1. Configure the grading techniques and their uniforms as desired.
 2. Open **Add-ons > ReShade LUT Baker**.
-3. Leave **LUT Size** at 64 unless a smaller LUT is intentional.
-4. Select exactly the techniques to bake. They are shown in ReShade execution order.
-5. Optionally enter an output filename. Leaving the field empty creates `ReShade_LUT_YYYYMMDD_HHMMSS.cube`.
+3. Select exactly the techniques to bake. They are shown in ReShade execution order.
+4. In **Export**, choose **Output format**. CUBE defaults to 64³ with 16³/32³ available. Monster Hunter Rise automatically uses 32³; switching back preserves the CUBE size preference.
+5. Optionally enter an output basename or complete matching suffix. Leaving the field empty creates `ReShade_LUT_YYYYMMDD_HHMMSS.cube` or `.tex.28`, depending on the format.
 6. Press **Export LUT**.
 
 **Select currently enabled** replaces the current selection with exactly the techniques that are enabled at that moment.
@@ -86,6 +89,8 @@ Exports are written to:
 
 Existing exports are not overwritten. If a requested filename already exists, a numeric suffix such as `_001` is added automatically.
 
+For Rise the full suffix is retained: `MyGrade.tex.28`, then `MyGrade_001.tex.28`. A collision that occurs during the final atomic commit causes an explicit failure, never an overwrite. Format, effective size, name, output directory and range policy are snapshotted when the request is queued and cannot change during its bake/readback/worker.
+
 Each CUBE file contains:
 
 - `LUT_3D_SIZE`
@@ -102,6 +107,25 @@ Rows use standard CUBE order with red changing fastest, then green, then blue.
 CUBE values are serialized with `std::numeric_limits<float>::max_digits10`, which is sufficient for binary32 round trips. Finite values outside the 0 to 1 output range are retained.
 
 The default 0 to 1 input domain is also the domain handled correctly by ReShade 6.8.0's native CUBE texture loader.
+
+### Monster Hunter Rise output
+
+Choose **Monster Hunter Rise (.tex.28)** for a direct 32 × 32 × 32 bake. The resulting file is exactly **131,128 bytes**: the verified 56-byte TEX28 header followed by 32,768 RGBA samples. Red changes fastest, then green, then blue; alpha is always 255. This is only the verified Rise profile, not a general RE Engine texture exporter. See [the binary profile](docs/RISE_TEX28.md).
+
+Rise stores normalized RGB only. NaN/infinity always fails. Finite values outside 0–1 fail by default with the original range in the error. The optional **Clamp to 0-1** checkbox explicitly clips those values; it does not normalize the lattice or modify the float samples. The result/UI/log reports source range, clipped RGB component/sample counts and maximum/mean/RMS quantization error. These quantization metrics are against the policy-adjusted float input, separate from GPU identity validation; they do not include the loss caused by clipping. Quantization uses `floor(double(value) * 255 + 0.5)` without an added gamma/sRGB transform, even though the verified header declares DXGI 29 (`R8G8B8A8_UNORM_SRGB`).
+
+Only the requested TEX is written, with no sidecar or automatically managed alternate filename. Its verified technique order and range/quantization metrics are logged to `ReShade.log`; CUBE retains its embedded metadata. `ReShadeLUTPreview.fx` loads CUBE, **not TEX**. You can additionally export the same selection as a 32³ CUBE for numerical node comparison, keeping uniforms unchanged between the two exports.
+
+For the future Rise Rehydrated custom-LUT manager, the intended paths are:
+
+```text
+Physical: natives/STM/rise_rehydrated/custom_lut/MyGrade.tex.28
+Logical:  rise_rehydrated/custom_lut/MyGrade.tex
+```
+
+External loading requires REFramework's **Enable Loose File Loader**. The published Rise Rehydrated 1.1.0 manager does **not** discover custom LUTs yet: copying a file there is not a loading test. Custom discovery, selection/presets, refresh and fallback belong to that separate project. The baker neither searches for nor installs into a game.
+
+The profile is backed by inspected native neutral/Color Boost textures and offline numerical evidence, but no file from this new exporter has yet been tested in Rise. Start with an identity and an asymmetric axes fixture using an authorized loading path when available, then compare a real RGB grading. Disable the original ReShade grading while applying the native TEX, keep other overrides fixed and neutralize participating original engine LUTs to avoid double grading/mixing. Check primaries, ramps, shadows, skin and highlights in SDR first, then HDR independently. The engine applies LUTs at a different render stage and may blend scene LUTs; valid bytes do not prove the same look. HDR is not disabled or presumed equivalent.
 
 ## Previewing a LUT
 
@@ -150,6 +174,8 @@ For the default 64³ LUT, the identity lattice is flattened into a 512 × 512 fl
     -> floating-point CUBE export
 ```
 
+Rise instead starts with a 32³ lattice (flattened to 256 × 128), follows the **same floating-point GPU path**, then quantizes and writes TEX on the CPU worker. There is no 8/10-bit bake intermediate or resampling from 64³.
+
 A custom floating-point render target causes ReShade 6.8.0 to compile a custom effect permutation for the bake target. Its built-ins describe the bake resource rather than the gameplay back buffer:
 
 - `BUFFER_WIDTH` and `BUFFER_HEIGHT` describe the flattened LUT texture.
@@ -165,7 +191,7 @@ The baker records gameplay and bake buffer information in every exported CUBE so
 
 ReShade's ordered technique list is used directly. The baker does not sort techniques by name or effect file.
 
-Each selected technique is rendered onto the same offscreen target, so the output of one becomes `COLOR` for the next. The `reshade_render_technique` event sequence is checked after every call, and a CUBE file is not written unless every requested technique reports execution in exactly the expected order.
+Each selected technique is rendered onto the same offscreen target, so the output of one becomes `COLOR` for the next. The `reshade_render_technique` event sequence is checked after every call, and no LUT is written unless every requested technique reports execution in exactly the expected order.
 
 Executing a selected subset also causes ReShade's begin/finish effect events to occur around each direct technique call. Normal full-chain rendering emits those events once around the whole chain. Another installed add-on that reacts to these events can therefore influence a bake.
 
@@ -173,7 +199,7 @@ ReShade's public technique API exposes an effect filename rather than its full s
 
 ### GPU synchronization
 
-GPU work is submitted with a completion fence and polled on later presentations. The add-on does not perform a blocking GPU wait from inside ReShade's present callback. Once the fence completes, samples are copied to CPU memory and CUBE serialization runs on a background worker.
+GPU work is submitted with a completion fence and polled on later presentations. The add-on does not perform a blocking GPU wait from inside ReShade's present callback. Once the fence completes, samples are copied to CPU memory and CUBE serialization or TEX quantization/writing runs on a background worker that owns its CPU data and makes no ReShade/runtime calls. Runtime reset cancels queued GPU work and releases resources only after ReShade's queue-idle teardown; a started CPU writer can finish its already validated snapshot independently.
 
 ReShade 6.8.0 implements the OpenGL fence signal with `glFinish`, so OpenGL can still incur a one-time synchronous hitch during export. Vulkan requires timeline-semaphore support for the completion fence. If the active backend cannot create or signal the required fence, the baker fails explicitly rather than reusing an unsynchronized target.
 
@@ -193,6 +219,7 @@ The repository includes both runtime and offline validation paths:
 - `tools/validate_cube.py inspect` checks the declaration, input domain, finite values and exact `N³` row count.
 - `tools/validate_cube.py identity` compares an export against the ideal red-fastest identity lattice.
 - `tools/validate_cube.py compare` compares every lattice node of two generated LUTs and reports maximum, mean and RMS RGB error.
+- `tools/validate_rise_tex.py inspect` checks the exact Rise profile, byte count and alpha. `identity` measures against ideal nodes; `compare-cube` compares TEX nodes against a matching 32³ float CUBE, optionally with explicit `--clamp`.
 - `ReShadeLUTPreview.fx` provides a practical visual apply/split/difference comparison on game content.
 
 Examples:
@@ -201,6 +228,9 @@ Examples:
 python tools/validate_cube.py inspect "C:\Game\LUT_Bakes\MyPreset.cube"
 python tools/validate_cube.py identity "C:\Game\LUT_Bakes\Identity.cube" --tolerance 1e-6
 python tools/validate_cube.py compare reference.cube candidate.cube --tolerance 1e-6
+python tools/validate_rise_tex.py inspect MyGrade.tex.28
+python tools/validate_rise_tex.py identity Identity32.tex.28
+python tools/validate_rise_tex.py compare-cube MyGrade.tex.28 MyGrade.cube
 ```
 
 Offline metrics measure values at lattice nodes. Differences between lattice nodes also include 3D-LUT interpolation and approximation error, which are separate from exporter readback error.
@@ -211,9 +241,9 @@ See [BUILDING.md](BUILDING.md) for reproducible Visual Studio 2022/CMake build c
 
 A Windows GitHub Actions workflow builds the `.addon64` and runs the C++ and Python tests.
 
-The C++ tests cover technique-selection reconciliation, duplicate identity changes, select-currently-enabled semantics, lattice dimensions/order, identity metrics, FP16 conversion, filename safety and atomic non-overwriting CUBE output.
+The C++ tests cover technique-selection reconciliation, duplicate identity changes, select-currently-enabled semantics, lattice dimensions/order, identity metrics, FP16 conversion, filename safety and atomic non-overwriting output. Rise tests additionally cover exact header/payload, channel axes, rounding, non-finite/range rejection, explicit clipping, unchanged CUBE samples, format snapshots, final-commit collisions and cleanup after write/serializer failures.
 
-Python tests cover strict parsing, ordering, identity metrics, comparison metrics and malformed-file rejection.
+Python tests cover strict parsing, ordering, identity metrics, comparison metrics and malformed-file rejection. CTest also generates files using the real C++ writers and verifies every TEX byte against an independent Python float32/quantization reference, plus CUBE 16³/32³/64³ identity and float round trips. The optional `rise_tex_fixtures` executable generates identity and asymmetric axes fixtures for validation; no auxiliary grading shaders or game assets are included. See [BUILDING.md](BUILDING.md) for commands.
 
 ## Technical references
 

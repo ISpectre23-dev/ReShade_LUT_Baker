@@ -1,5 +1,7 @@
 #pragma once
 
+#include "export_settings.hpp"
+
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -41,10 +43,6 @@ struct cube_metadata
 [[nodiscard]] error_metrics measure_identity_error(const std::vector<float4> &samples, std::uint32_t size);
 [[nodiscard]] std::uint16_t float_to_half(float value) noexcept;
 [[nodiscard]] float half_to_float(std::uint16_t value) noexcept;
-
-[[nodiscard]] bool validate_output_filename(std::string_view value, std::string &normalized, std::string &error);
-[[nodiscard]] std::string make_timestamped_filename();
-[[nodiscard]] std::filesystem::path make_unique_output_path(const std::filesystem::path &directory, const std::string &filename);
 
 [[nodiscard]] bool write_cube_atomic(
     const std::filesystem::path &destination,

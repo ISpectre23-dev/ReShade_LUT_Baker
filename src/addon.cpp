@@ -2,6 +2,7 @@
 #include <reshade.hpp>
 
 #include "cube_lut.hpp"
+#include "rise_tex.hpp"
 #include "technique_catalog.hpp"
 #include "version.hpp"
 
@@ -86,8 +87,7 @@ struct gpu_resources
 
 struct export_job
 {
-    std::filesystem::path destination;
-    std::uint32_t lattice_size = 0;
+    lut_baker::export_request request;
     std::size_t technique_count = 0;
     bool identity = false;
     std::vector<lut_baker::float4> samples;
@@ -101,6 +101,10 @@ struct export_result
     bool identity = false;
     std::filesystem::path output;
     std::size_t technique_count = 0;
+    lut_baker::output_format format = lut_baker::output_format::cube;
+    std::uint32_t lattice_size = 0;
+    lut_baker::rise_export_metrics rise_metrics;
+    std::vector<std::string> verified_techniques;
     std::string error;
     std::string warning;
 };
@@ -118,7 +122,7 @@ struct runtime_state
 
     std::array<char, 160> output_filename {};
     std::array<char, 96> technique_filter {};
-    std::uint32_t lattice_size = 64;
+    lut_baker::export_preferences preferences;
 
     operation_phase phase = operation_phase::ready;
     std::string status = "Ready";
@@ -128,10 +132,13 @@ struct runtime_state
     double last_duration_seconds = 0.0;
     lut_baker::error_metrics identity_metrics {};
     bool identity_metrics_valid = false;
+    lut_baker::rise_export_metrics rise_metrics;
+    bool rise_metrics_valid = false;
 
     bool export_pending = false;
     technique_selection requested;
-    std::string normalized_filename;
+    // Immutable until the current bake AND its writer have finished.
+    lut_baker::export_request request;
     std::chrono::steady_clock::time_point request_started {};
     std::uint32_t attempts = 0;
 
@@ -446,7 +453,7 @@ bool ensure_gpu_resources(runtime_state &state, std::string &error)
         return false;
     }
 
-    const auto layout = lut_baker::choose_lattice_layout(state.lattice_size);
+    const auto layout = lut_baker::choose_lattice_layout(state.request.lattice_size);
     if (layout.first == 0 || layout.second == 0)
     {
         error = "The selected LUT size cannot be represented as a 2D lattice texture.";
@@ -454,7 +461,7 @@ bool ensure_gpu_resources(runtime_state &state, std::string &error)
     }
 
     if (state.gpu.owner == state.runtime->get_device() &&
-        state.gpu.lattice_size == state.lattice_size &&
+        state.gpu.lattice_size == state.request.lattice_size &&
         state.gpu.width == layout.first && state.gpu.height == layout.second &&
         state.gpu.target != 0 && state.gpu.readback != 0 && state.gpu.target_rtv != 0)
         return true;
@@ -464,10 +471,10 @@ bool ensure_gpu_resources(runtime_state &state, std::string &error)
         error = "Previous GPU resources could not be released safely; reset the graphics device or restart the game.";
         return false;
     }
-    if (create_resources_for_format(state, state.lattice_size, layout.first, layout.second, format::r32g32b32a32_float, false, error))
+    if (create_resources_for_format(state, state.request.lattice_size, layout.first, layout.second, format::r32g32b32a32_float, false, error))
         return true;
 
-    if (create_resources_for_format(state, state.lattice_size, layout.first, layout.second, format::r16g16b16a16_float, true, error))
+    if (create_resources_for_format(state, state.request.lattice_size, layout.first, layout.second, format::r16g16b16a16_float, true, error))
     {
         state.warning = "RGBA32F render targets are unavailable. This bake uses RGBA16F and has lower precision.";
         log_message(reshade::log::level::warning, state.warning);
@@ -539,7 +546,7 @@ bool readback_samples(runtime_state &state, std::vector<lut_baker::float4> &samp
         return false;
     }
 
-    const std::size_t sample_count = static_cast<std::size_t>(state.lattice_size) * state.lattice_size * state.lattice_size;
+    const std::size_t sample_count = static_cast<std::size_t>(state.request.lattice_size) * state.request.lattice_size * state.request.lattice_size;
     samples.resize(sample_count);
     std::size_t output_index = 0;
     const auto *const base = static_cast<const std::uint8_t *>(mapped.data);
@@ -602,19 +609,42 @@ export_result execute_export_job(export_job job) noexcept
 {
     export_result result;
     result.identity = job.identity;
-    result.output = job.destination;
     result.technique_count = job.technique_count;
+    result.format = job.request.format;
+    result.lattice_size = job.request.lattice_size;
     result.warning = std::move(job.initial_warning);
 
     try
     {
         std::string error;
-        if (!lut_baker::write_cube_atomic(job.destination, job.lattice_size, job.samples, job.metadata, false, error))
+        if (job.request.format == lut_baker::output_format::rise_tex)
+            result.verified_techniques = std::move(job.metadata.techniques);
+        // Directory/name were snapshotted at queue time. Collision checks and
+        // serialization are CPU-only; never access the runtime from here.
+        result.output = lut_baker::make_unique_output_path(job.request.directory, job.request.filename, job.request.format);
+        if (result.output.empty())
         {
-            result.error = "CUBE file write failed: " + error;
+            result.error = "Unable to choose a non-existing output filename.";
             return result;
         }
-
+        const bool written = job.request.format == lut_baker::output_format::cube
+            ? lut_baker::write_cube_atomic(result.output, job.request.lattice_size, job.samples, job.metadata, false, error)
+            : lut_baker::write_rise_tex_atomic(result.output, job.request.lattice_size, job.samples, job.request.range, result.rise_metrics, error);
+        if (!written)
+        {
+            result.error = std::string(lut_baker::output_format_name(job.request.format)) + " file write failed: " + error;
+            return result;
+        }
+        if (job.request.format == lut_baker::output_format::rise_tex && result.rise_metrics.clipped_components != 0)
+        {
+            if (!result.warning.empty())
+                result.warning += " ";
+            std::ostringstream clipping;
+            clipping << std::setprecision(9) << "Explicit Clamp to 0-1 clipped " << result.rise_metrics.clipped_components
+                     << " RGB component(s) in " << result.rise_metrics.clipped_samples << " sample(s). Original range: ["
+                     << result.rise_metrics.source_minimum << ", " << result.rise_metrics.source_maximum << "].";
+            result.warning += clipping.str();
+        }
         result.success = true;
     }
     catch (const std::exception &exception)
@@ -641,7 +671,7 @@ void start_export_writer(runtime_state &state, const std::vector<technique_key> 
     state.identity_metrics_valid = ordered.empty();
     if (state.identity_metrics_valid)
     {
-        state.identity_metrics = lut_baker::measure_identity_error(samples, state.lattice_size);
+        state.identity_metrics = lut_baker::measure_identity_error(samples, state.request.lattice_size);
         const double tolerance = state.gpu.fp16_fallback ? 5.0e-4 : 1.0e-6;
         if (!std::isfinite(state.identity_metrics.maximum_absolute) || state.identity_metrics.maximum_absolute > tolerance)
         {
@@ -655,7 +685,7 @@ void start_export_writer(runtime_state &state, const std::vector<technique_key> 
     }
 
     lut_baker::cube_metadata metadata;
-    metadata.title = std::filesystem::u8path(state.normalized_filename).stem().u8string();
+    metadata.title = std::filesystem::u8path(state.request.filename).stem().u8string();
     metadata.exporter_version = LUT_BAKER_VERSION_STRING;
     metadata.reshade_api = "20 (ReShade 6.8.0 minimum)";
     metadata.graphics_api = graphics_api_name(state.runtime->get_device()->get_api());
@@ -670,17 +700,8 @@ void start_export_writer(runtime_state &state, const std::vector<technique_key> 
     if (state.gpu.fp16_fallback)
         metadata.warnings.push_back("RGBA32F was unavailable, so the GPU lattice and readback used RGBA16F.");
 
-    const std::filesystem::path directory = output_directory();
-    const std::filesystem::path destination = lut_baker::make_unique_output_path(directory, state.normalized_filename);
-    if (destination.empty())
-    {
-        set_failure(state, "Unable to choose a non-existing output filename.");
-        return;
-    }
-
     export_job job;
-    job.destination = destination;
-    job.lattice_size = state.lattice_size;
+    job.request = state.request;
     job.technique_count = ordered.size();
     job.identity = ordered.empty();
     job.samples = std::move(samples);
@@ -693,12 +714,12 @@ void start_export_writer(runtime_state &state, const std::vector<technique_key> 
         state.writer_future = std::async(std::launch::async, execute_export_job, std::move(job));
         state.writer_pending = true;
         state.phase = operation_phase::writing;
-        state.status = "Writing CUBE";
+        state.status = std::string("Writing ") + lut_baker::output_format_name(state.request.format);
         state.detail = "The GPU result is valid. File serialization is running on a background worker.";
     }
     catch (const std::exception &exception)
     {
-        set_failure(state, std::string("Unable to start the CUBE writer: ") + exception.what());
+        set_failure(state, std::string("Unable to start the LUT writer: ") + exception.what());
     }
 }
 
@@ -710,7 +731,7 @@ bool poll_export_writer(runtime_state &state)
     if (state.writer_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
     {
         state.phase = operation_phase::writing;
-        state.status = "Writing CUBE";
+        state.status = std::string("Writing ") + lut_baker::output_format_name(state.request.format);
         return true;
     }
 
@@ -721,17 +742,17 @@ bool poll_export_writer(runtime_state &state)
     }
     catch (const std::exception &exception)
     {
-        result.error = std::string("CUBE writer worker failed: ") + exception.what();
+        result.error = std::string("LUT writer worker failed: ") + exception.what();
     }
     catch (...)
     {
-        result.error = "CUBE writer worker failed unexpectedly.";
+        result.error = "LUT writer worker failed unexpectedly.";
     }
     state.writer_pending = false;
 
     if (!result.success)
     {
-        set_failure(state, result.error.empty() ? "CUBE writer failed without an error message." : result.error);
+        set_failure(state, result.error.empty() ? "LUT writer failed without an error message." : result.error);
         return true;
     }
 
@@ -740,15 +761,31 @@ bool poll_export_writer(runtime_state &state)
     state.status = result.identity ? "Identity LUT exported and verified" : "LUT exported";
     state.last_output = result.output;
     state.warning = std::move(result.warning);
+    state.rise_metrics_valid = result.format == lut_baker::output_format::rise_tex;
+    state.rise_metrics = result.rise_metrics;
     state.last_duration_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - state.request_started).count();
 
     std::ostringstream detail;
-    detail << result.output.u8string() << " | " << result.technique_count << " technique(s) | "
+    detail << result.output.u8string() << " | " << lut_baker::output_format_name(result.format)
+           << " " << result.lattice_size << "^3 | " << result.technique_count << " technique(s) | "
            << std::fixed << std::setprecision(3) << state.last_duration_seconds << " s";
     state.detail = detail.str();
     if (!state.warning.empty())
         log_message(reshade::log::level::warning, state.warning);
     log_message(reshade::log::level::info, "Exported " + result.output.u8string());
+    if (state.rise_metrics_valid)
+    {
+        const auto &metrics = state.rise_metrics;
+        std::ostringstream message;
+        message << std::setprecision(9) << "Rise TEX: RGB source range [" << metrics.source_minimum << ", " << metrics.source_maximum
+                << "]; range policy " << (state.request.range == lut_baker::range_policy::clamp ? "explicit clamp" : "reject")
+                << "; clipped " << metrics.clipped_components << " components in " << metrics.clipped_samples << " samples"
+                << "; quantization max/mean/RMS " << metrics.quantization.maximum_absolute << "/"
+                << metrics.quantization.mean_absolute << "/" << metrics.quantization.rms;
+        log_message(reshade::log::level::info, message.str());
+        for (std::size_t index = 0; index < result.verified_techniques.size(); ++index)
+            log_message(reshade::log::level::info, "Rise technique " + std::to_string(index + 1) + ": " + result.verified_techniques[index]);
+    }
     return true;
 }
 
@@ -901,15 +938,15 @@ void process_bake(runtime_state &state, command_queue *present_queue)
 void begin_export(runtime_state &state)
 {
     std::lock_guard<std::recursive_mutex> lock(state.mutex);
-    if (state.export_pending || state.submission_pending)
+    if (state.export_pending || state.submission_pending || state.writer_pending)
         return;
 
     if (state.catalog_dirty)
         refresh_catalog(state);
 
-    std::string normalized;
+    lut_baker::export_request request;
     std::string error;
-    if (!lut_baker::validate_output_filename(state.output_filename.data(), normalized, error))
+    if (!lut_baker::snapshot_export_request(state.preferences, state.output_filename.data(), output_directory(), request, error))
     {
         state.phase = operation_phase::error;
         state.status = "Invalid output filename";
@@ -919,7 +956,7 @@ void begin_export(runtime_state &state)
 
     state.requested = state.selected;
 
-    state.normalized_filename = std::move(normalized);
+    state.request = std::move(request);
     state.export_pending = true;
     state.phase = operation_phase::queued;
     state.status = state.requested.empty() ? "Identity bake queued" : "Bake queued";
@@ -927,6 +964,7 @@ void begin_export(runtime_state &state)
     state.warning.clear();
     state.last_output.clear();
     state.identity_metrics_valid = false;
+    state.rise_metrics_valid = false;
     state.request_started = std::chrono::steady_clock::now();
     state.attempts = 0;
 }
@@ -964,7 +1002,7 @@ void on_finish_present(command_queue *queue, swapchain *swapchain)
             continue;
 
         update_source_snapshot(*state, swapchain);
-        if (state->export_pending || state->submission_pending)
+        if (state->export_pending || state->submission_pending || state->writer_pending)
             process_bake(*state, queue);
     }
 }
@@ -1078,9 +1116,18 @@ void draw_status(const runtime_state &state)
 
     if (state.identity_metrics_valid)
     {
-        ImGui::Text("Identity max abs error: %.9g", state.identity_metrics.maximum_absolute);
-        ImGui::Text("Identity mean abs error: %.9g", state.identity_metrics.mean_absolute);
-        ImGui::Text("Identity RMS error: %.9g", state.identity_metrics.rms);
+        ImGui::Text("GPU identity max abs error: %.9g", state.identity_metrics.maximum_absolute);
+        ImGui::Text("GPU identity mean abs error: %.9g", state.identity_metrics.mean_absolute);
+        ImGui::Text("GPU identity RMS error: %.9g", state.identity_metrics.rms);
+    }
+    if (state.rise_metrics_valid)
+    {
+        const auto &metrics = state.rise_metrics;
+        ImGui::Text("Rise source RGB range: [%.9g, %.9g]", metrics.source_minimum, metrics.source_maximum);
+        ImGui::Text("Clipped RGB components / samples: %zu / %zu", metrics.clipped_components, metrics.clipped_samples);
+        ImGui::Text("8-bit quantization max / mean / RMS: %.9g / %.9g / %.9g",
+            metrics.quantization.maximum_absolute, metrics.quantization.mean_absolute, metrics.quantization.rms);
+        ImGui::TextDisabled("Quantization error is measured after the range policy, separately from GPU identity error.");
     }
 }
 
@@ -1110,17 +1157,8 @@ void draw_overlay(effect_runtime *runtime)
     else
         ImGui::TextDisabled("Gameplay buffer: waiting for presentation data");
 
-    const char *size_labels[] = { "16", "32", "64" };
-    int size_index = state->lattice_size == 16 ? 0 : state->lattice_size == 32 ? 1 : 2;
-    const bool busy = state->export_pending || state->submission_pending;
+    const bool busy = state->export_pending || state->submission_pending || state->writer_pending;
     ImGui::BeginDisabled(busy);
-    ImGui::SetNextItemWidth(100.0f);
-    if (ImGui::Combo("LUT Size", &size_index, size_labels, IM_ARRAYSIZE(size_labels)))
-        state->lattice_size = size_index == 0 ? 16u : size_index == 1 ? 32u : 64u;
-
-    ImGui::SetNextItemWidth(-1.0f);
-    ImGui::InputTextWithHint("Output filename", "automatic timestamp", state->output_filename.data(), state->output_filename.size());
-
     ImGui::Spacing();
     ImGui::TextUnformatted("Techniques to bake (real ReShade order)");
     ImGui::SetNextItemWidth(-1.0f);
@@ -1179,6 +1217,53 @@ void draw_overlay(effect_runtime *runtime)
     if (selected_count == 0)
         ImGui::TextDisabled("Exporting with no selection performs the GPU identity validation test.");
 
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::TextUnformatted("Export");
+    const char *format_labels[] = { "CUBE (.cube)", "Monster Hunter Rise (.tex.28)" };
+    int format_index = state->preferences.format == lut_baker::output_format::cube ? 0 : 1;
+    ImGui::SetNextItemWidth(280.0f);
+    if (ImGui::Combo("Output format", &format_index, format_labels, IM_ARRAYSIZE(format_labels)))
+    {
+        const auto next = format_index == 0 ? lut_baker::output_format::cube : lut_baker::output_format::rise_tex;
+        const std::string filename = lut_baker::filename_for_format(state->output_filename.data(), state->preferences.format, next);
+        if (filename.size() < state->output_filename.size())
+        {
+            state->output_filename.fill('\0');
+            std::copy(filename.begin(), filename.end(), state->output_filename.begin());
+        }
+        state->preferences.format = next;
+    }
+    if (state->preferences.format == lut_baker::output_format::cube)
+    {
+        const char *size_labels[] = { "16", "32", "64" };
+        int size_index = state->preferences.cube_size == 16 ? 0 : state->preferences.cube_size == 32 ? 1 : 2;
+        ImGui::SetNextItemWidth(100.0f);
+        if (ImGui::Combo("LUT Size", &size_index, size_labels, IM_ARRAYSIZE(size_labels)))
+            state->preferences.cube_size = size_index == 0 ? 16u : size_index == 1 ? 32u : 64u;
+    }
+    else
+    {
+        ImGui::TextUnformatted("LUT size: 32 x 32 x 32 (automatic) | 8 bits per RGB channel");
+        ImGui::TextWrapped("Rise TEX stores only normalized RGB. Out-of-range values are rejected by default. No gamma conversion is applied. Native loading and visual equivalence must be tested in Rise; the CUBE preview cannot load TEX.");
+        bool clamp = state->preferences.rise_range == lut_baker::range_policy::clamp;
+        if (ImGui::Checkbox("Clamp to 0-1", &clamp))
+            state->preferences.rise_range = clamp ? lut_baker::range_policy::clamp : lut_baker::range_policy::reject;
+        if (clamp)
+            ImGui::TextWrapped("Explicit clipping discards RGB below 0 or above 1. The result reports the original range and affected component/sample counts.");
+    }
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::InputTextWithHint("Output filename", "automatic timestamp", state->output_filename.data(), state->output_filename.size());
+    if (state->output_filename[0] == '\0')
+        ImGui::TextDisabled("ReShade_LUT_YYYYMMDD_HHMMSS%s", lut_baker::output_extension(state->preferences.format));
+    else
+    {
+        std::string normalized, error;
+        if (lut_baker::validate_output_filename(state->output_filename.data(), normalized, error, state->preferences.format))
+            ImGui::TextDisabled("%s", normalized.c_str());
+        else
+            ImGui::TextWrapped("%s", error.c_str());
+    }
     if (ImGui::Button("Export LUT", ImVec2(-1.0f, 0.0f)))
         begin_export(*state);
     ImGui::EndDisabled();
@@ -1221,7 +1306,7 @@ void unregister_callbacks()
 }
 
 extern "C" __declspec(dllexport) const char *NAME = "ReShade LUT Baker";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Exports selected ReShade techniques as a high-precision 3D CUBE LUT.";
+extern "C" __declspec(dllexport) const char *DESCRIPTION = "Bakes selected ReShade techniques in floating point and exports CUBE or native Monster Hunter Rise TEX LUTs.";
 
 BOOL APIENTRY DllMain(HMODULE module, const DWORD reason, LPVOID)
 {

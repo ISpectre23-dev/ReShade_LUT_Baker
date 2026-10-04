@@ -1,60 +1,16 @@
 #include "cube_lut.hpp"
-
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <Windows.h>
+#include "atomic_output.hpp"
 
 #include <algorithm>
-#include <atomic>
-#include <cctype>
-#include <chrono>
 #include <cmath>
-#include <ctime>
-#include <fstream>
 #include <iomanip>
 #include <limits>
 #include <locale>
 #include <cstring>
 #include <sstream>
-#include <system_error>
 
 namespace
 {
-std::atomic<std::uint64_t> s_temp_counter { 0 };
-
-std::filesystem::path make_temp_path(const std::filesystem::path &destination)
-{
-    std::wostringstream suffix;
-    suffix << L".tmp." << GetCurrentProcessId() << L'.' << s_temp_counter.fetch_add(1, std::memory_order_relaxed);
-    return destination.parent_path() / (destination.filename().wstring() + suffix.str());
-}
-
-bool install_temp_file(
-    const std::filesystem::path &temporary,
-    const std::filesystem::path &destination,
-    const bool overwrite,
-    std::string &error)
-{
-    DWORD flags = MOVEFILE_WRITE_THROUGH;
-    if (overwrite)
-        flags |= MOVEFILE_REPLACE_EXISTING;
-
-    if (MoveFileExW(temporary.c_str(), destination.c_str(), flags) != FALSE)
-        return true;
-
-    const DWORD code = GetLastError();
-    std::error_code ignored;
-    std::filesystem::remove(temporary, ignored);
-
-    std::ostringstream message;
-    message << "Unable to install output file (Windows error " << code << ").";
-    if (!overwrite && code == ERROR_ALREADY_EXISTS)
-        message << " The destination already exists.";
-    error = message.str();
-    return false;
-}
-
 void write_comment(std::ostream &stream, const std::string &label, const std::string &value)
 {
     if (value.empty())
@@ -263,96 +219,6 @@ float half_to_float(const std::uint16_t value) noexcept
     return result;
 }
 
-bool validate_output_filename(std::string_view value, std::string &normalized, std::string &error)
-{
-    normalized.assign(value.begin(), value.end());
-    while (!normalized.empty() && (normalized.back() == ' ' || normalized.back() == '.'))
-        normalized.pop_back();
-
-    if (normalized.empty())
-    {
-        normalized = make_timestamped_filename();
-        return true;
-    }
-
-    const bool contains_control_character = std::any_of(normalized.begin(), normalized.end(), [](const unsigned char character) {
-        return character < 0x20u;
-    });
-    if (normalized == "." || normalized == ".." || contains_control_character ||
-        normalized.find_first_of("<>:\"/\\|?*") != std::string::npos ||
-        normalized.find("..") != std::string::npos)
-    {
-        error = "Use a file name only, without path separators, '..', or Windows-reserved characters.";
-        return false;
-    }
-
-    if (normalized.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
-        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, normalized.data(), static_cast<int>(normalized.size()), nullptr, 0) == 0)
-    {
-        error = "The output filename is not valid UTF-8.";
-        return false;
-    }
-
-    const std::size_t extension_position = normalized.find_last_of('.');
-    if (extension_position == std::string::npos)
-        normalized += ".cube";
-    else if (normalized.substr(extension_position) != ".cube")
-    {
-        error = "The output file must use the lowercase .cube extension.";
-        return false;
-    }
-
-    std::string stem = normalized.substr(0, normalized.find('.'));
-    while (!stem.empty() && stem.back() == ' ')
-        stem.pop_back();
-    std::transform(stem.begin(), stem.end(), stem.begin(), [](const unsigned char character) {
-        return static_cast<char>(std::toupper(character));
-    });
-    const bool numbered_device = stem.size() == 4 && stem[3] >= '1' && stem[3] <= '9' &&
-        (stem.compare(0, 3, "COM") == 0 || stem.compare(0, 3, "LPT") == 0);
-    if (stem.empty() || stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL" ||
-        stem == "CLOCK$" || stem == "CONIN$" || stem == "CONOUT$" || numbered_device)
-    {
-        error = "The output filename is reserved by Windows.";
-        return false;
-    }
-
-    return true;
-}
-
-std::string make_timestamped_filename()
-{
-    const auto now = std::chrono::system_clock::now();
-    const std::time_t time = std::chrono::system_clock::to_time_t(now);
-    std::tm local {};
-    localtime_s(&local, &time);
-
-    std::ostringstream stream;
-    stream << "ReShade_LUT_" << std::put_time(&local, "%Y%m%d_%H%M%S") << ".cube";
-    return stream.str();
-}
-
-std::filesystem::path make_unique_output_path(const std::filesystem::path &directory, const std::string &filename)
-{
-    const std::filesystem::path requested = directory / std::filesystem::u8path(filename);
-    std::error_code error;
-    if (!std::filesystem::exists(requested, error))
-        return requested;
-
-    const std::filesystem::path stem = requested.stem();
-    const std::filesystem::path extension = requested.extension();
-    for (std::uint32_t index = 1; index < 10000; ++index)
-    {
-        std::ostringstream suffix;
-        suffix << '_' << std::setw(3) << std::setfill('0') << index;
-        const std::filesystem::path candidate = directory / (stem.wstring() + std::filesystem::path(suffix.str()).wstring() + extension.wstring());
-        if (!std::filesystem::exists(candidate, error))
-            return candidate;
-    }
-
-    return {};
-}
-
 bool write_cube_atomic(
     const std::filesystem::path &destination,
     const std::uint32_t size,
@@ -379,68 +245,31 @@ bool write_cube_atomic(
         }
     }
 
-    std::error_code filesystem_error;
-    if (!destination.parent_path().empty())
-        std::filesystem::create_directories(destination.parent_path(), filesystem_error);
-    if (filesystem_error)
-    {
-        error = "Unable to create the LUT_Bakes output directory: " + filesystem_error.message();
-        return false;
-    }
+    return write_file_atomic(destination, overwrite, [&](std::ostream &stream, std::string &) {
+        stream.imbue(std::locale::classic());
+        stream << "# ReShade LUT Baker\n";
+        write_comment(stream, "Exporter version", metadata.exporter_version);
+        write_comment(stream, "ReShade API", metadata.reshade_api);
+        write_comment(stream, "Graphics API", metadata.graphics_api);
+        write_comment(stream, "Source buffer", metadata.source_buffer);
+        write_comment(stream, "Bake buffer", metadata.bake_buffer);
+        stream << "# LUT size: " << size << '\n';
+        stream << "# Selected techniques in verified execution order: " << metadata.techniques.size() << '\n';
+        for (std::size_t index = 0; index < metadata.techniques.size(); ++index)
+            stream << "#   " << (index + 1) << ". " << sanitize_cube_text(metadata.techniques[index], false) << '\n';
+        for (const std::string &warning : metadata.warnings)
+            stream << "# WARNING: " << sanitize_cube_text(warning, false) << '\n';
 
-    if (!overwrite && std::filesystem::exists(destination, filesystem_error))
-    {
-        error = "The destination already exists.";
-        return false;
-    }
+        stream << "TITLE \"" << sanitize_cube_text(metadata.title.empty() ? "ReShade LUT" : metadata.title, true) << "\"\n";
+        stream << "LUT_3D_SIZE " << size << '\n';
+        stream << "DOMAIN_MIN 0.0 0.0 0.0\n";
+        stream << "DOMAIN_MAX 1.0 1.0 1.0\n\n";
+        stream << std::setprecision(std::numeric_limits<float>::max_digits10) << std::defaultfloat;
 
-    const std::filesystem::path temporary = make_temp_path(destination);
-    std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
-    if (!stream)
-    {
-        error = "Unable to create the temporary CUBE file.";
-        return false;
-    }
+        for (std::size_t index = 0; index < expected_count; ++index)
+            stream << samples[index].r << ' ' << samples[index].g << ' ' << samples[index].b << '\n';
 
-    stream.imbue(std::locale::classic());
-    stream << "# ReShade LUT Baker\n";
-    write_comment(stream, "Exporter version", metadata.exporter_version);
-    write_comment(stream, "ReShade API", metadata.reshade_api);
-    write_comment(stream, "Graphics API", metadata.graphics_api);
-    write_comment(stream, "Source buffer", metadata.source_buffer);
-    write_comment(stream, "Bake buffer", metadata.bake_buffer);
-    stream << "# LUT size: " << size << '\n';
-    stream << "# Selected techniques in verified execution order: " << metadata.techniques.size() << '\n';
-    for (std::size_t index = 0; index < metadata.techniques.size(); ++index)
-        stream << "#   " << (index + 1) << ". " << sanitize_cube_text(metadata.techniques[index], false) << '\n';
-    for (const std::string &warning : metadata.warnings)
-        stream << "# WARNING: " << sanitize_cube_text(warning, false) << '\n';
-
-    stream << "TITLE \"" << sanitize_cube_text(metadata.title.empty() ? "ReShade LUT" : metadata.title, true) << "\"\n";
-    stream << "LUT_3D_SIZE " << size << '\n';
-    stream << "DOMAIN_MIN 0.0 0.0 0.0\n";
-    stream << "DOMAIN_MAX 1.0 1.0 1.0\n\n";
-    stream << std::setprecision(std::numeric_limits<float>::max_digits10) << std::defaultfloat;
-
-    for (std::size_t index = 0; index < expected_count; ++index)
-        stream << samples[index].r << ' ' << samples[index].g << ' ' << samples[index].b << '\n';
-
-    stream.flush();
-    if (!stream)
-    {
-        stream.close();
-        std::filesystem::remove(temporary, filesystem_error);
-        error = "The CUBE write failed before all samples were committed.";
-        return false;
-    }
-    stream.close();
-    if (!stream)
-    {
-        std::filesystem::remove(temporary, filesystem_error);
-        error = "The CUBE file could not be closed cleanly.";
-        return false;
-    }
-
-    return install_temp_file(temporary, destination, overwrite, error);
+        return true;
+    }, error);
 }
 }

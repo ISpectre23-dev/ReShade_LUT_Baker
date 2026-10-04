@@ -56,8 +56,8 @@ bool serialize_rise_tex(const std::uint32_t size, const std::vector<float4> &sam
         std::ostringstream message;
         message << std::setprecision(9) << "Rise TEX cannot store RGB outside 0-1. Source range: ["
                 << metrics.source_minimum << ", " << metrics.source_maximum << "]; " << metrics.clipped_components
-                << " component(s) in " << metrics.clipped_samples << " sample(s) outside range. No TEX was written. "
-                << "Export CUBE to retain these values, or explicitly enable Clamp to 0-1 for Rise.";
+                << " value(s) in " << metrics.clipped_samples << " sample(s) out of range. No file was written. "
+                << "Export as CUBE to keep them, or enable Clamp to 0-1.";
         error = message.str();
         return false;
     }

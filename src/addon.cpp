@@ -457,7 +457,7 @@ bool ensure_gpu_resources(runtime_state &state, std::string &error)
     if (state.gpu.work_in_flight)
     {
         error = state.gpu.synchronization_failed
-            ? "The previous GPU submission could not be synchronized. Reset the graphics device or restart the game."
+            ? "The previous bake could not be synchronized with the GPU. Restart the game (or reset the graphics device) before baking again."
             : "Previous GPU work is still pending.";
         return false;
     }
@@ -485,7 +485,7 @@ bool ensure_gpu_resources(runtime_state &state, std::string &error)
 
     if (create_resources_for_format(state, state.request.lattice_size, layout.first, layout.second, format::r16g16b16a16_float, true, error))
     {
-        state.warning = "RGBA32F render targets are unavailable. This bake uses RGBA16F and has lower precision.";
+        state.warning = "RGBA32F (32-bit float) is unavailable on this renderer. This bake uses RGBA16F (16-bit float) and has lower precision.";
         log_message(reshade::log::level::warning, state.warning);
         return true;
     }
@@ -515,7 +515,7 @@ void check_bake_timeout(runtime_state &state)
     if (state.export_pending && !state.writer_pending &&
         state.bake_control.timed_out(std::chrono::steady_clock::now()))
     {
-        std::string message = "Timed out waiting for the offscreen bake. No LUT was written. Check ReShade.log for shader errors.";
+        std::string message = "Timed out waiting for the offscreen bake. No LUT was written. A selected shader probably failed to compile for the bake: check ReShade's Log tab or ReShade.log.";
         if (state.bake_control.waiting())
             message += " Waiting technique: " + technique_label(state.bake_control.waiting_key()) + '.';
         set_failure(state, message);
@@ -531,7 +531,7 @@ void abort_export(runtime_state &state)
     state.capture_execution_events = false;
     state.phase = operation_phase::cancelled;
     state.status = "Export cancelled";
-    state.detail = "No LUT was written. Already queued ReShade compilation cannot be interrupted by the add-on.";
+    state.detail = "No LUT was written. Shader compilation already queued in ReShade cannot be interrupted and may finish in the background.";
     if (state.submission_pending)
         state.detail += " Submitted GPU work will drain through its fence before another export is allowed.";
     state.last_duration_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - state.request_started).count();
@@ -576,7 +576,7 @@ bool readback_samples(runtime_state &state, std::vector<lut_baker::float4> &samp
     subresource_data mapped {};
     if (!device->map_texture_region(state.gpu.readback, 0, nullptr, map_access::read_only, &mapped))
     {
-        error = "GPU readback mapping failed.";
+        error = "GPU readback failed (could not map the result). No LUT was written.";
         return false;
     }
 
@@ -584,7 +584,7 @@ bool readback_samples(runtime_state &state, std::vector<lut_baker::float4> &samp
     if (mapped.data == nullptr || mapped.row_pitch < state.gpu.width * bytes_per_pixel)
     {
         device->unmap_texture_region(state.gpu.readback, 0);
-        error = "GPU readback returned an invalid row pitch.";
+        error = "GPU readback returned an invalid row pitch. No LUT was written.";
         return false;
     }
 
@@ -619,7 +619,7 @@ bool readback_samples(runtime_state &state, std::vector<lut_baker::float4> &samp
     device->unmap_texture_region(state.gpu.readback, 0);
     if (output_index != sample_count)
     {
-        error = "GPU readback did not contain every lattice sample.";
+        error = "GPU readback did not contain every lattice sample. No LUT was written.";
         return false;
     }
     return true;
@@ -682,8 +682,8 @@ export_result execute_export_job(export_job job) noexcept
             if (!result.warning.empty())
                 result.warning += " ";
             std::ostringstream clipping;
-            clipping << std::setprecision(9) << "Explicit Clamp to 0-1 clipped " << result.rise_metrics.clipped_components
-                     << " RGB component(s) in " << result.rise_metrics.clipped_samples << " sample(s). Original range: ["
+            clipping << std::setprecision(9) << "Clamp to 0-1 clipped " << result.rise_metrics.clipped_components
+                     << " RGB value(s) in " << result.rise_metrics.clipped_samples << " sample(s). Original range: ["
                      << result.rise_metrics.source_minimum << ", " << result.rise_metrics.source_maximum << "].";
             result.warning += clipping.str();
         }
@@ -749,15 +749,15 @@ void start_export_writer(runtime_state &state, const std::vector<technique_key> 
     job.samples = std::move(samples);
     job.metadata = std::move(metadata);
     if (state.gpu.fp16_fallback)
-        job.initial_warning = "RGBA32F was unavailable. This export used RGBA16F and has lower precision.";
+        job.initial_warning = "RGBA32F (32-bit float) was unavailable on this renderer. This export used RGBA16F (16-bit float) and has lower precision.";
 
     try
     {
         state.writer_future = std::async(std::launch::async, execute_export_job, std::move(job));
         state.writer_pending = true;
         state.phase = operation_phase::writing;
-        state.status = std::string("Writing ") + lut_baker::output_format_name(state.request.format);
-        state.detail = "The GPU result is valid. File serialization is running on a background worker.";
+        state.status = std::string("Writing ") + lut_baker::output_format_name(state.request.format) + " file";
+        state.detail = "The GPU result is valid. The file is being written in the background.";
     }
     catch (const std::exception &exception)
     {
@@ -773,7 +773,7 @@ bool poll_export_writer(runtime_state &state)
     if (state.writer_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
     {
         state.phase = operation_phase::writing;
-        state.status = std::string("Writing ") + lut_baker::output_format_name(state.request.format);
+        state.status = std::string("Writing ") + lut_baker::output_format_name(state.request.format) + " file";
         return true;
     }
 
@@ -841,7 +841,7 @@ void set_compile_progress(runtime_state &state)
     std::ostringstream status;
     status << "Compiling shaders (attempt " << state.attempts << ')';
     state.status = status.str();
-    state.detail = "Waiting for ReShade to finish loading the offscreen permutation. No file is written until every selected technique runs in the expected order.";
+    state.detail = "ReShade is compiling the offscreen version of the selected shaders. Nothing is written until every selected technique runs in the expected order.";
     if (state.bake_control.waiting())
         state.detail += " Technique: " + technique_label(state.bake_control.waiting_key());
 }
@@ -867,7 +867,7 @@ void process_bake(runtime_state &state, command_queue *present_queue)
             {
                 state.phase = operation_phase::waiting_gpu;
                 if (state.submission_has_result)
-                    state.status = "Waiting for FP readback";
+                    state.status = "Waiting for GPU readback";
                 else
                     set_compile_progress(state);
             }
@@ -887,7 +887,7 @@ void process_bake(runtime_state &state, command_queue *present_queue)
         if (has_result)
         {
             state.phase = operation_phase::reading;
-            state.status = std::string("Reading FP result for ") + lut_baker::output_format_name(state.request.format);
+            state.status = "Reading GPU result";
             start_export_writer(state, completed_techniques);
             return;
         }
@@ -986,14 +986,14 @@ void process_bake(runtime_state &state, command_queue *present_queue)
         }
         if (state.execution_mismatch || not_rendered == nullptr)
         {
-            set_failure(state, "The offscreen technique execution sequence did not match ReShade's selected order. No LUT was written.");
+            set_failure(state, "The techniques did not execute in ReShade's order. No LUT was written. Another add-on may be interfering.");
             return;
         }
         if (!state.bake_control.wait_for_compilation(not_rendered->key, attempt_reload_generation))
         {
-            set_failure(state, "A selected technique still did not execute after ReShade finished loading its offscreen permutation: " +
-                technique_label(not_rendered->key) + ". The shader may fail to compile or exclude its technique/uniforms for the FP buffer. "
-                "No LUT was written and no further retries will be submitted. Check ReShade.log; the gameplay preset was not changed by the baker.");
+            set_failure(state, "A selected technique did not execute after ReShade compiled its offscreen version: " +
+                technique_label(not_rendered->key) + ". The shader may fail to compile or disable itself for the floating-point target. "
+                "No LUT was written and no retry will be made. Check ReShade.log; your preset was not changed.");
             return;
         }
         log_message(reshade::log::level::info, "Waiting for offscreen compilation of " + technique_label(not_rendered->key) +
@@ -1017,7 +1017,7 @@ void process_bake(runtime_state &state, command_queue *present_queue)
         return;
     }
     state.phase = operation_phase::waiting_gpu;
-    state.status = "Waiting for FP readback";
+    state.status = "Waiting for GPU readback";
     state.detail = "GPU work was submitted asynchronously; the LUT will be written after its completion fence is observed.";
 }
 
@@ -1276,6 +1276,7 @@ void open_in_explorer(const std::filesystem::path &path)
 void draw_header(const runtime_state &state)
 {
     ImGui::TextDisabled("Game buffer");
+    ImGui::SetItemTooltip("Back buffer the game is presenting: resolution, format, bit depth and color space. Reference only; the bake runs on its own offscreen target.");
     ImGui::SameLine();
     if (state.source_buffer.valid)
         ImGui::TextUnformatted(source_buffer_description(state).c_str());
@@ -1285,13 +1286,13 @@ void draw_header(const runtime_state &state)
     if (ImGui::CollapsingHeader("How it works and limitations"))
     {
         ImGui::Indent();
-        wrapped_bullet("Bakes the combined RGB transform of the selected techniques through an offscreen floating-point lattice. Technique states in ReShade are never changed.");
+        wrapped_bullet("Bakes the combined color transform of the selected techniques into a single 3D LUT. It runs on an offscreen floating-point target; technique on/off states in ReShade are never changed.");
         ImGui::PushStyleColor(ImGuiCol_Text, color_warning);
-        wrapped_bullet("A 3D LUT cannot represent spatial, temporal, depth, random, dither or neighbor-dependent processing.");
+        wrapped_bullet("A 3D LUT maps color to color only. Spatial, temporal, depth-based, random or dithered effects (blur, sharpening, bloom, film grain, vignette...) cannot be captured.");
         ImGui::PopStyleColor();
-        wrapped_bullet("The offscreen permutation uses the bake dimensions/format, BUFFER_COLOR_SPACE=0 and no separate sRGB SRV/RTV, so SRGBTexture/SRGBWriteEnabled behave linearly. BUFFER_*-conditional or sRGB-semantic techniques may differ from gameplay, especially in HDR.");
-        wrapped_bullet("Other add-ons reacting to effect begin/finish events can change subset rendering.");
-        wrapped_bullet("With nothing selected, the bake runs the GPU identity validation test instead.");
+        wrapped_bullet("The offscreen target uses the bake's own size and format, with BUFFER_COLOR_SPACE = 0 and no sRGB conversion (SRGBTexture / SRGBWriteEnabled act as linear). Shaders that depend on those can differ from gameplay, especially in HDR.");
+        wrapped_bullet("Other add-ons that hook effect begin/finish events can alter the bake.");
+        wrapped_bullet("With nothing selected, the bake exports an identity LUT (no color change) and validates the GPU round trip.");
         ImGui::Unindent();
     }
 }
@@ -1302,18 +1303,18 @@ void draw_technique_list(runtime_state &state)
 
     const ImGuiStyle &style = ImGui::GetStyle();
     const float buttons_width =
-        ImGui::CalcTextSize("Use enabled").x + ImGui::CalcTextSize("Clear").x + ImGui::CalcTextSize("Refresh").x +
+        ImGui::CalcTextSize("Select active").x +ImGui::CalcTextSize("Clear").x + ImGui::CalcTextSize("Refresh").x +
         style.FramePadding.x * 6.0f + style.ItemSpacing.x * 3.0f;
     ImGui::SetNextItemWidth(std::max(ImGui::GetContentRegionAvail().x - buttons_width, ImGui::GetFontSize() * 8.0f));
     ImGui::InputTextWithHint("##technique_filter", "Filter by effect or technique", state.technique_filter.data(), state.technique_filter.size());
     ImGui::SameLine();
-    if (ImGui::Button("Use enabled"))
+    if (ImGui::Button("Select active"))
         state.selected = lut_baker::select_currently_enabled(state.techniques);
-    ImGui::SetItemTooltip("Select exactly the techniques currently enabled in ReShade.");
+    ImGui::SetItemTooltip("Select exactly the techniques currently enabled in ReShade and deselect the rest.");
     ImGui::SameLine();
     if (ImGui::Button("Clear"))
         state.selected.clear();
-    ImGui::SetItemTooltip("Deselect every technique.");
+    ImGui::SetItemTooltip("Deselect everything. An empty selection exports an identity LUT.");
     ImGui::SameLine();
     if (ImGui::Button("Refresh"))
     {
@@ -1337,7 +1338,7 @@ void draw_technique_list(runtime_state &state)
         ImGui::TableSetupColumn("##bake", ImGuiTableColumnFlags_WidthFixed);
         ImGui::TableSetupColumn("Effect", ImGuiTableColumnFlags_WidthStretch, 1.0f);
         ImGui::TableSetupColumn("Technique", ImGuiTableColumnFlags_WidthStretch, 1.2f);
-        ImGui::TableSetupColumn("Live", ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableSetupColumn("Active", ImGuiTableColumnFlags_WidthFixed);
         ImGui::TableHeadersRow();
 
         for (std::size_t index = 0; index < state.techniques.size(); ++index)
@@ -1383,7 +1384,7 @@ void draw_technique_list(runtime_state &state)
 
             ImGui::TableNextColumn();
             status_dot(entry.enabled ? color_success : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled),
-                entry.enabled ? "Currently enabled in ReShade" : "Currently disabled in ReShade");
+                entry.enabled ? "Enabled in ReShade" : "Disabled in ReShade (can still be baked)");
 
             if (toggled)
             {
@@ -1423,8 +1424,8 @@ struct output_format_option
 };
 
 const output_format_option format_options[] = {
-    { lut_baker::output_format::cube, "CUBE", "CUBE", ".cube", "Standard 3D LUT. 16, 32 or 64 points per axis, full float precision. Loadable by ReShadeLUTPreview.fx." },
-    { lut_baker::output_format::rise_tex, "Monster Hunter Rise", "Rise TEX", ".tex.28", "Native Rise TEX28 LUT. Always 32x32x32 with 8 bits per RGB channel." },
+    { lut_baker::output_format::cube, "CUBE", "CUBE", ".cube", "Standard .cube 3D LUT. 16, 32 or 64 points per axis, float precision; values outside 0-1 are kept. Loadable by ReShadeLUTPreview.fx." },
+    { lut_baker::output_format::rise_tex, "Monster Hunter Rise", "Rise TEX", ".tex.28", "Native Monster Hunter Rise LUT (TEX v28). Fixed 32x32x32, 8 bits per channel; values limited to 0-1." },
 };
 
 const output_format_option &find_format_option(const lut_baker::output_format format)
@@ -1484,6 +1485,7 @@ void draw_output_settings(runtime_state &state)
             if (ImGui::RadioButton(label.c_str(), state.preferences.cube_size == size))
                 state.preferences.cube_size = size;
         }
+        help_marker("Points per axis. Higher is more accurate and produces a larger file.");
     }
     else
     {
@@ -1497,16 +1499,17 @@ void draw_output_settings(runtime_state &state)
         bool clamp = state.preferences.rise_range == lut_baker::range_policy::clamp;
         if (ImGui::Checkbox("Clamp to 0-1", &clamp))
             state.preferences.rise_range = clamp ? lut_baker::range_policy::clamp : lut_baker::range_policy::reject;
-        help_marker("Rise TEX stores normalized RGB only and no gamma conversion is applied. By default, an export whose RGB leaves 0-1 is rejected. "
-            "With clipping, values below 0 or above 1 are discarded and the result reports the original range and affected component/sample counts.");
+        help_marker("Rise TEX stores RGB in 0-1 only; no gamma conversion is applied.\n"
+            "Off: an export with values outside 0-1 is rejected and nothing is written.\n"
+            "On: those values are clamped, and the result reports the original range and how many were clipped.");
 
         skip_field_label();
-        disabled_wrapped("TEX cannot be loaded by ReShadeLUTPreview.fx. Verify native loading and the look in-game.");
+        disabled_wrapped("ReShadeLUTPreview.fx cannot load TEX. Verify the result in-game.");
     }
 
     field_label("File name");
     ImGui::SetNextItemWidth(-FLT_MIN);
-    ImGui::InputTextWithHint("##output_filename", "automatic timestamp", state.output_filename.data(), state.output_filename.size());
+    ImGui::InputTextWithHint("##output_filename", "empty = automatic timestamp", state.output_filename.data(), state.output_filename.size());
 
     skip_field_label();
     std::string normalized, error;
@@ -1555,7 +1558,7 @@ void draw_export_button(runtime_state &state)
         begin_export(state);
     ImGui::PopStyleColor(2);
     if (state.selected.empty())
-        ImGui::SetItemTooltip("Nothing is selected, so this writes an identity LUT and verifies the GPU round trip.");
+        ImGui::SetItemTooltip("Nothing is selected: exports an identity LUT (no color change) and verifies that the GPU reproduces it within floating-point tolerance.");
 }
 
 void draw_progress(runtime_state &state)
@@ -1567,12 +1570,12 @@ void draw_progress(runtime_state &state)
     ImGui::ProgressBar(-1.0f * static_cast<float>(ImGui::GetTime()), ImVec2(-FLT_MIN, ImGui::GetFrameHeight() * 1.6f), state.status.c_str());
     ImGui::PopStyleColor();
     ImGui::BeginDisabled(!lut_baker::can_abort_export(state.export_pending, state.writer_pending));
-    if (ImGui::Button("Abort export"))
+    if (ImGui::Button("Cancel export"))
         abort_export(state);
     ImGui::EndDisabled();
     ImGui::SetItemTooltip(state.writer_pending
         ? "The validated result is already being written. Cancellation is available before file writing starts."
-        : "Stop this bake without writing a LUT. Already submitted GPU work and ReShade compilation must finish safely.");
+        : "Stops the bake without writing a file. Shader compilation and GPU work already submitted still finish in the background.");
 }
 
 void metric_row(const char *label, const char *format, ...)
@@ -1646,20 +1649,20 @@ void draw_result(runtime_state &state)
                 if (state.identity_metrics_valid)
                 {
                     const auto &metrics = state.identity_metrics;
-                    metric_row("Identity error max/mean/RMS", "%.9g / %.9g / %.9g", metrics.maximum_absolute, metrics.mean_absolute, metrics.rms);
+                    metric_row("Identity error (max / mean / RMS)","%.9g / %.9g / %.9g", metrics.maximum_absolute, metrics.mean_absolute, metrics.rms);
                 }
                 if (state.rise_metrics_valid)
                 {
                     const auto &metrics = state.rise_metrics;
                     metric_row("Source RGB range", "[%.9g, %.9g]", metrics.source_minimum, metrics.source_maximum);
-                    metric_row("Clipped components/samples", "%zu / %zu", metrics.clipped_components, metrics.clipped_samples);
-                    metric_row("8-bit quantization max/mean/RMS", "%.9g / %.9g / %.9g",
+                    metric_row("Clipped values / samples", "%zu / %zu", metrics.clipped_components, metrics.clipped_samples);
+                    metric_row("8-bit quantization error (max / mean / RMS)","%.9g / %.9g / %.9g",
                         metrics.quantization.maximum_absolute, metrics.quantization.mean_absolute, metrics.quantization.rms);
                 }
                 ImGui::EndTable();
             }
             if (state.rise_metrics_valid)
-                disabled_wrapped("Quantization error is measured after the range policy, separately from GPU identity error.");
+                disabled_wrapped("Quantization error is measured after the range check (and after clamping, if enabled) and is separate from the GPU identity error.");
             ImGui::TreePop();
         }
     }
@@ -1734,7 +1737,7 @@ void unregister_callbacks()
 
 extern "C" __declspec(dllexport) const char *NAME = "ReShade LUT Baker";
 extern "C" __declspec(dllexport) const char *AUTHOR = "ISpectre23";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Bakes selected ReShade techniques in floating point and exports CUBE or native Monster Hunter Rise TEX LUTs.";
+extern "C" __declspec(dllexport) const char *DESCRIPTION = "Bakes the color grading of selected ReShade techniques into a 3D LUT (.cube) or a supported game's native LUT format.";
 
 BOOL APIENTRY DllMain(HMODULE module, const DWORD reason, LPVOID)
 {

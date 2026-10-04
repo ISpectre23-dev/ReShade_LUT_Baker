@@ -68,14 +68,14 @@ The optional preview shader can be copied into any configured ReShade Effect Sea
 
 1. Configure the grading techniques and their uniforms as desired.
 2. Open **Add-ons > ReShade LUT Baker**.
-3. Under **Techniques**, tick exactly the techniques to bake (click the checkbox or anywhere on the row). They are listed in ReShade execution order; the **Live** dot shows whether each one is currently enabled in ReShade.
+3. Under **Techniques**, tick exactly the techniques to bake (click the checkbox or anywhere on the row). They are listed in ReShade execution order; the **Active** dot shows whether each one is currently enabled in ReShade.
 4. Under **Output**, pick the **Format** from the dropdown. CUBE defaults to 64x64x64 with 16x16x16/32x32x32 available. Monster Hunter Rise always uses 32x32x32; switching back preserves the CUBE size preference.
 5. Optionally enter a **File name** (basename or complete matching suffix). The line below the field shows the exact name that will be written. Leaving it empty creates `ReShade_LUT_YYYYMMDD_HHMMSS.cube` or `.tex.28`, depending on the format.
 6. Press the bake button. Its label states what will be written, for example **Bake 3 techniques - CUBE 64x64x64**. With nothing selected it reads **Export identity LUT (GPU validation)**.
 
-**Use enabled** replaces the current selection with exactly the techniques that are enabled at that moment, **Clear** deselects everything and **Refresh** re-reads the technique list. The filter field narrows the list by effect or technique name without changing the selection.
+**Select active** replaces the current selection with exactly the techniques that are enabled at that moment, **Clear** deselects everything and **Refresh** re-reads the technique list. The filter field narrows the list by effect or technique name without changing the selection.
 
-While a bake runs, the settings are locked and a progress bar shows the current step. **Abort export** stops a queued bake, compilation wait or GPU readback wait without writing a LUT. It is disabled once the validated CPU result starts file writing; that atomic writer must finish. Cancellation does not interrupt ReShade's already queued shader compilation or submitted GPU commands. GPU resources are retained until their completion fence is observed, so another export may briefly remain unavailable. No selected technique state or active request snapshot is changed by the cancellation. The **Result** section then reports the written file, format, technique count and duration, any warnings and validation metrics, with **Open output folder** and **Copy file name** (handy for `ReShadeLUTPreview.fx`). The accuracy limitations are listed under **How it works and limitations**.
+While a bake runs, the settings are locked and a progress bar shows the current step. **Cancel export** stops a queued bake, compilation wait or GPU readback wait without writing a LUT. It is disabled once the validated CPU result starts file writing; that atomic writer must finish. Cancellation does not interrupt ReShade's already queued shader compilation or submitted GPU commands. GPU resources are retained until their completion fence is observed, so another export may briefly remain unavailable. No selected technique state or active request snapshot is changed by the cancellation. The **Result** section then reports the written file, format, technique count and duration, any warnings and validation metrics, with **Open output folder** and **Copy file name** (handy for `ReShadeLUTPreview.fx`). The accuracy limitations are listed under **How it works and limitations**.
 
 After effects are reloaded, valid selections are preserved and techniques that no longer exist are removed automatically. An active bake keeps its own immutable selection snapshot, so a later catalog refresh cannot silently change the requested export.
 
@@ -139,7 +139,7 @@ It provides:
 
 - tetrahedral or trilinear interpolation
 - **Apply LUT** view
-- **Split: Input | LUT** view with an aligned one-pixel divider
+- **Split: Original | LUT** view with an aligned one-pixel divider
 - **Absolute difference** view with adjustable gain
 
 To use it:

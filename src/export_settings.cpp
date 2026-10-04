@@ -60,7 +60,7 @@ bool validate_output_filename(const std::string_view value, std::string &normali
     if (normalized == "." || normalized == ".." || contains_control_character ||
         normalized.find_first_of("<>:\"/\\|?*") != std::string::npos || normalized.find("..") != std::string::npos)
     {
-        error = "Use a file name only, without path separators, '..', or Windows-reserved characters.";
+        error = "Use a file name only: no path separators, '..' or Windows-reserved characters.";
         return false;
     }
 
@@ -76,7 +76,7 @@ bool validate_output_filename(const std::string_view value, std::string &normali
         normalized += suffix;
     else if (!ends_with(normalized, suffix))
     {
-        error = "The output file must use the lowercase " + suffix + " extension.";
+        error = "The file name must end in " + suffix + " (lowercase), or have no extension so it is added automatically.";
         return false;
     }
     // A known suffix left inside a compound filename is almost certainly a

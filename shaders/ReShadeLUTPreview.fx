@@ -50,8 +50,8 @@ uniform int LUTBakerInterpolation <
 uniform int LUTBakerPreviewMode <
 	ui_type = "combo";
 	ui_label = "Preview mode";
-	ui_items = "Apply LUT\0Split: Input | LUT\0Absolute difference\0";
-	ui_tooltip = "Apply the LUT, compare the unmodified input on the left with the LUT on the right, or display abs(input - LUT).";
+	ui_items = "Apply LUT\0Split: Original | LUT\0Absolute difference\0";
+	ui_tooltip = "Apply the LUT, compare the original image on the left with the LUT on the right, or display abs(original - LUT).";
 > = 0;
 
 uniform float LUTBakerSplitPosition <
@@ -60,7 +60,7 @@ uniform float LUTBakerSplitPosition <
 	ui_min = 0.0;
 	ui_max = 1.0;
 	ui_step = 0.01;
-	ui_tooltip = "Horizontal position of the Input | LUT split.";
+	ui_tooltip = "Horizontal position of the Original | LUT split.";
 > = 0.5;
 
 uniform float LUTBakerDifferenceGain <
@@ -69,7 +69,7 @@ uniform float LUTBakerDifferenceGain <
 	ui_min = 1.0;
 	ui_max = 32.0;
 	ui_step = 0.25;
-	ui_tooltip = "Multiplies the absolute-difference preview. A value of 1 shows the unscaled difference.";
+	ui_tooltip = "Multiplies the difference view so small changes become visible. 1 shows the real difference.";
 > = 1.0;
 
 float3 LUTBakerFetch(int3 coordinate)
@@ -185,7 +185,7 @@ float4 LUTBakerPreviewPS(float4 position : SV_Position, float2 texcoord : TEXCOO
 
 technique ReShadeLUTPreview <
 	ui_label = "ReShade LUT Preview";
-	ui_tooltip = "Loads the explicitly configured ReShade LUT Baker CUBE file as a native FP32 3D texture.";
+	ui_tooltip = "Applies a .cube exported by ReShade LUT Baker. Set LUT_BAKER_CUBE_FILENAME and LUT_BAKER_CUBE_SIZE in the preprocessor definitions, then reload effects.";
 >
 {
 	pass

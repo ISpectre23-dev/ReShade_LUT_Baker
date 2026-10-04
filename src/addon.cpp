@@ -13,7 +13,10 @@
 #include <array>
 #include <chrono>
 #include <cctype>
+#include <cfloat>
 #include <cmath>
+#include <cstdarg>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <exception>
@@ -129,6 +132,9 @@ struct runtime_state
     std::string detail;
     std::string warning;
     std::filesystem::path last_output;
+    lut_baker::output_format last_format = lut_baker::output_format::cube;
+    std::uint32_t last_lattice_size = 0;
+    std::size_t last_technique_count = 0;
     double last_duration_seconds = 0.0;
     lut_baker::error_metrics identity_metrics {};
     bool identity_metrics_valid = false;
@@ -760,6 +766,9 @@ bool poll_export_writer(runtime_state &state)
     state.phase = operation_phase::success;
     state.status = result.identity ? "Identity LUT exported and verified" : "LUT exported";
     state.last_output = result.output;
+    state.last_format = result.format;
+    state.last_lattice_size = result.lattice_size;
+    state.last_technique_count = result.technique_count;
     state.warning = std::move(result.warning);
     state.rise_metrics_valid = result.format == lut_baker::output_format::rise_tex;
     state.rise_metrics = result.rise_metrics;
@@ -1096,38 +1105,453 @@ bool on_reorder_techniques(effect_runtime *runtime, std::size_t, effect_techniqu
     return false;
 }
 
-void draw_status(const runtime_state &state)
+// Semantic colors stay fixed so success/warning/error read the same in every
+// ReShade theme; everything else is taken from the active ImGui style.
+const ImVec4 color_success(0.40f, 0.85f, 0.50f, 1.0f);
+const ImVec4 color_warning(1.00f, 0.72f, 0.25f, 1.0f);
+const ImVec4 color_error(1.00f, 0.42f, 0.36f, 1.0f);
+const ImVec4 color_busy(0.26f, 0.48f, 0.80f, 1.0f);
+
+bool is_busy(const runtime_state &state)
 {
-    ImVec4 color(0.75f, 0.75f, 0.75f, 1.0f);
-    if (state.phase == operation_phase::success)
-        color = ImVec4(0.35f, 0.90f, 0.45f, 1.0f);
-    else if (state.phase == operation_phase::error)
-        color = ImVec4(1.0f, 0.35f, 0.30f, 1.0f);
-    else if (state.export_pending)
-        color = ImVec4(0.95f, 0.75f, 0.25f, 1.0f);
+    return state.export_pending || state.submission_pending || state.writer_pending;
+}
 
-    ImGui::TextUnformatted("Status:");
+std::string to_lower(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](const unsigned char character) { return static_cast<char>(std::tolower(character)); });
+    return value;
+}
+
+std::string lattice_label(const std::uint32_t size)
+{
+    return std::to_string(size) + 'x' + std::to_string(size) + 'x' + std::to_string(size);
+}
+
+// Small filled circle aligned with the current text line.
+void status_dot(const ImVec4 &color, const char *tooltip = nullptr)
+{
+    const float size = ImGui::GetFontSize() * 0.5f;
+    const ImVec2 cursor = ImGui::GetCursorScreenPos();
+    const float line_height = ImGui::GetFrameHeight();
+    ImGui::Dummy(ImVec2(size, line_height));
+    ImGui::GetWindowDrawList()->AddCircleFilled(
+        ImVec2(cursor.x + size * 0.5f, cursor.y + line_height * 0.5f), size * 0.5f, ImGui::ColorConvertFloat4ToU32(color));
+    if (tooltip != nullptr)
+        ImGui::SetItemTooltip("%s", tooltip);
+}
+
+void disabled_wrapped(const char *text)
+{
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::TextWrapped("%s", text);
+    ImGui::PopStyleColor();
+}
+
+void wrapped_bullet(const char *text)
+{
+    ImGui::Bullet();
+    ImGui::TextWrapped("%s", text);
+}
+
+// Left-aligned label column shared by every field so the form lines up.
+float field_label_width()
+{
+    return ImGui::CalcTextSize("File name").x + ImGui::GetFontSize() * 1.5f;
+}
+
+void field_label(const char *label)
+{
+    const float start = ImGui::GetCursorPosX();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(label);
+    ImGui::SameLine(start + field_label_width());
+}
+
+void skip_field_label()
+{
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + field_label_width());
+}
+
+void help_marker(const char *text)
+{
     ImGui::SameLine();
-    ImGui::TextColored(color, "%s", state.status.c_str());
-    if (!state.detail.empty())
-        ImGui::TextWrapped("%s", state.detail.c_str());
-    if (!state.warning.empty())
-        ImGui::TextColored(ImVec4(1.0f, 0.70f, 0.20f, 1.0f), "%s", state.warning.c_str());
-
-    if (state.identity_metrics_valid)
+    ImGui::TextDisabled("(?)");
+    if (ImGui::BeginItemTooltip())
     {
-        ImGui::Text("GPU identity max abs error: %.9g", state.identity_metrics.maximum_absolute);
-        ImGui::Text("GPU identity mean abs error: %.9g", state.identity_metrics.mean_absolute);
-        ImGui::Text("GPU identity RMS error: %.9g", state.identity_metrics.rms);
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+        ImGui::TextUnformatted(text);
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
     }
-    if (state.rise_metrics_valid)
+}
+
+void open_in_explorer(const std::filesystem::path &path)
+{
+    ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+void draw_header(const runtime_state &state)
+{
+    ImGui::TextDisabled("Game buffer");
+    ImGui::SameLine();
+    if (state.source_buffer.valid)
+        ImGui::TextUnformatted(source_buffer_description(state).c_str());
+    else
+        ImGui::TextDisabled("waiting for presentation");
+
+    if (ImGui::CollapsingHeader("How it works and limitations"))
     {
-        const auto &metrics = state.rise_metrics;
-        ImGui::Text("Rise source RGB range: [%.9g, %.9g]", metrics.source_minimum, metrics.source_maximum);
-        ImGui::Text("Clipped RGB components / samples: %zu / %zu", metrics.clipped_components, metrics.clipped_samples);
-        ImGui::Text("8-bit quantization max / mean / RMS: %.9g / %.9g / %.9g",
-            metrics.quantization.maximum_absolute, metrics.quantization.mean_absolute, metrics.quantization.rms);
-        ImGui::TextDisabled("Quantization error is measured after the range policy, separately from GPU identity error.");
+        ImGui::Indent();
+        wrapped_bullet("Bakes the combined RGB transform of the selected techniques through an offscreen floating-point lattice. Technique states in ReShade are never changed.");
+        ImGui::PushStyleColor(ImGuiCol_Text, color_warning);
+        wrapped_bullet("A 3D LUT cannot represent spatial, temporal, depth, random, dither or neighbor-dependent processing.");
+        ImGui::PopStyleColor();
+        wrapped_bullet("The offscreen permutation uses the bake dimensions/format, BUFFER_COLOR_SPACE=0 and no separate sRGB SRV/RTV, so SRGBTexture/SRGBWriteEnabled behave linearly. BUFFER_*-conditional or sRGB-semantic techniques may differ from gameplay, especially in HDR.");
+        wrapped_bullet("Other add-ons reacting to effect begin/finish events can change subset rendering.");
+        wrapped_bullet("With nothing selected, the bake runs the GPU identity validation test instead.");
+        ImGui::Unindent();
+    }
+}
+
+void draw_technique_list(runtime_state &state)
+{
+    ImGui::SeparatorText("Techniques");
+
+    const ImGuiStyle &style = ImGui::GetStyle();
+    const float buttons_width =
+        ImGui::CalcTextSize("Use enabled").x + ImGui::CalcTextSize("Clear").x + ImGui::CalcTextSize("Refresh").x +
+        style.FramePadding.x * 6.0f + style.ItemSpacing.x * 3.0f;
+    ImGui::SetNextItemWidth(std::max(ImGui::GetContentRegionAvail().x - buttons_width, ImGui::GetFontSize() * 8.0f));
+    ImGui::InputTextWithHint("##technique_filter", "Filter by effect or technique", state.technique_filter.data(), state.technique_filter.size());
+    ImGui::SameLine();
+    if (ImGui::Button("Use enabled"))
+        state.selected = lut_baker::select_currently_enabled(state.techniques);
+    ImGui::SetItemTooltip("Select exactly the techniques currently enabled in ReShade.");
+    ImGui::SameLine();
+    if (ImGui::Button("Clear"))
+        state.selected.clear();
+    ImGui::SetItemTooltip("Deselect every technique.");
+    ImGui::SameLine();
+    if (ImGui::Button("Refresh"))
+    {
+        state.catalog_dirty = true;
+        refresh_catalog(state);
+    }
+    ImGui::SetItemTooltip("Re-read the technique list from ReShade.");
+
+    const std::string filter = to_lower(state.technique_filter.data());
+    const float row_height = ImGui::GetFrameHeight();
+    const std::size_t visible_rows = std::clamp<std::size_t>(state.techniques.size(), 4, 12);
+    const float table_height = row_height * static_cast<float>(visible_rows + 1) + style.CellPadding.y * 2.0f * static_cast<float>(visible_rows + 1);
+
+    const ImGuiTableFlags table_flags = ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg |
+        ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingFixedFit;
+    std::size_t shown = 0;
+    if (ImGui::BeginTable("##techniques", 5, table_flags, ImVec2(0.0f, table_height)))
+    {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableSetupColumn("##bake", ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableSetupColumn("Effect", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("Technique", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+        ImGui::TableSetupColumn("Live", ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableHeadersRow();
+
+        for (std::size_t index = 0; index < state.techniques.size(); ++index)
+        {
+            const technique_entry &entry = state.techniques[index];
+            if (!filter.empty() && to_lower(technique_label(entry.key)).find(filter) == std::string::npos)
+                continue;
+            ++shown;
+
+            bool checked = state.selected.find(entry.key) != state.selected.end();
+            bool toggled = false;
+            ImGui::PushID(static_cast<int>(index));
+            ImGui::TableNextRow(ImGuiTableRowFlags_None, row_height);
+
+            // The whole row is a click target; the checkbox overlaps it.
+            ImGui::TableNextColumn();
+            char number[16];
+            std::snprintf(number, sizeof(number), "%03zu##row", index + 1);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0.0f, 0.5f));
+            if (ImGui::Selectable(number, checked, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap, ImVec2(0.0f, row_height)))
+                toggled = true;
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor();
+
+            ImGui::TableNextColumn();
+            if (ImGui::Checkbox("##selected", &checked))
+                toggled = !toggled;
+
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(entry.key.effect.c_str());
+
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(entry.key.name.c_str());
+            if (entry.key.occurrence_count > 1)
+            {
+                ImGui::SameLine();
+                ImGui::TextDisabled("%u/%u", entry.key.occurrence + 1, entry.key.occurrence_count);
+                ImGui::SetItemTooltip("Instance %u of %u with the same effect and technique name.", entry.key.occurrence + 1, entry.key.occurrence_count);
+            }
+
+            ImGui::TableNextColumn();
+            status_dot(entry.enabled ? color_success : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled),
+                entry.enabled ? "Currently enabled in ReShade" : "Currently disabled in ReShade");
+
+            if (toggled)
+            {
+                if (state.selected.find(entry.key) != state.selected.end())
+                    state.selected.erase(entry.key);
+                else
+                    state.selected.insert(entry.key);
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+
+    if (state.techniques.empty())
+        ImGui::TextDisabled("No techniques available yet. Reload ReShade effects, then press Refresh.");
+    else if (shown == 0)
+        ImGui::TextDisabled("No technique matches the filter.");
+    else
+    {
+        ImGui::TextDisabled("%zu of %zu selected, baked in ReShade order", state.selected.size(), state.techniques.size());
+        if (!filter.empty())
+        {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(%zu shown)", shown);
+        }
+    }
+}
+
+void set_output_format(runtime_state &state, const lut_baker::output_format next)
+{
+    if (next == state.preferences.format)
+        return;
+    const std::string filename = lut_baker::filename_for_format(state.output_filename.data(), state.preferences.format, next);
+    if (filename.size() < state.output_filename.size())
+    {
+        state.output_filename.fill('\0');
+        std::copy(filename.begin(), filename.end(), state.output_filename.begin());
+    }
+    state.preferences.format = next;
+}
+
+void draw_output_settings(runtime_state &state)
+{
+    ImGui::SeparatorText("Output");
+
+    field_label("Format");
+    if (ImGui::RadioButton("CUBE (.cube)", state.preferences.format == lut_baker::output_format::cube))
+        set_output_format(state, lut_baker::output_format::cube);
+    // Wrap under the first option instead of clipping in a narrow overlay.
+    const char *const rise_label = "Monster Hunter Rise (.tex.28)";
+    const float rise_width = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize(rise_label).x;
+    ImGui::SameLine();
+    if (ImGui::GetContentRegionAvail().x < rise_width)
+    {
+        ImGui::NewLine();
+        skip_field_label();
+    }
+    if (ImGui::RadioButton(rise_label, state.preferences.format == lut_baker::output_format::rise_tex))
+        set_output_format(state, lut_baker::output_format::rise_tex);
+
+    field_label("LUT size");
+    if (state.preferences.format == lut_baker::output_format::cube)
+    {
+        static const std::uint32_t sizes[] = { 16u, 32u, 64u };
+        for (const std::uint32_t size : sizes)
+        {
+            if (size != sizes[0])
+                ImGui::SameLine();
+            const std::string label = lattice_label(size);
+            if (ImGui::RadioButton(label.c_str(), state.preferences.cube_size == size))
+                state.preferences.cube_size = size;
+        }
+    }
+    else
+    {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("32x32x32, 8-bit");
+        ImGui::SameLine();
+        ImGui::TextDisabled("(fixed)");
+        ImGui::SetItemTooltip("Monster Hunter Rise LUTs are always 32x32x32 with 8 bits per RGB channel.");
+
+        field_label("Range");
+        bool clamp = state.preferences.rise_range == lut_baker::range_policy::clamp;
+        if (ImGui::Checkbox("Clamp to 0-1", &clamp))
+            state.preferences.rise_range = clamp ? lut_baker::range_policy::clamp : lut_baker::range_policy::reject;
+        help_marker("Rise TEX stores normalized RGB only and no gamma conversion is applied. By default, an export whose RGB leaves 0-1 is rejected. "
+            "With clipping, values below 0 or above 1 are discarded and the result reports the original range and affected component/sample counts.");
+
+        skip_field_label();
+        disabled_wrapped("TEX cannot be loaded by ReShadeLUTPreview.fx. Verify native loading and the look in-game.");
+    }
+
+    field_label("File name");
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::InputTextWithHint("##output_filename", "automatic timestamp", state.output_filename.data(), state.output_filename.size());
+
+    skip_field_label();
+    std::string normalized, error;
+    if (state.output_filename[0] == '\0')
+        ImGui::TextDisabled("Saves as ReShade_LUT_YYYYMMDD_HHMMSS%s", lut_baker::output_extension(state.preferences.format));
+    else if (lut_baker::validate_output_filename(state.output_filename.data(), normalized, error, state.preferences.format))
+        ImGui::TextDisabled("Saves as %s", normalized.c_str());
+    else
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, color_error);
+        ImGui::TextWrapped("%s", error.c_str());
+        ImGui::PopStyleColor();
+    }
+
+    const std::filesystem::path directory = output_directory();
+    std::error_code exists_error;
+    const bool directory_exists = std::filesystem::is_directory(directory, exists_error);
+    field_label("Folder");
+    ImGui::BeginDisabled(!directory_exists);
+    if (ImGui::Button("Open"))
+        open_in_explorer(directory);
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip(directory_exists ? "Open the output folder." : "The folder is created on the first export.");
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s", directory.u8string().c_str());
+}
+
+void draw_export_button(runtime_state &state)
+{
+    const lut_baker::output_format format = state.preferences.format;
+    const std::uint32_t size = lut_baker::effective_lattice_size(state.preferences);
+    const std::string target = std::string(format == lut_baker::output_format::cube ? "CUBE" : "Rise TEX") + ' ' + lattice_label(size);
+
+    std::string label;
+    if (state.selected.empty())
+        label = "Export identity LUT  (GPU validation)  -  " + target;
+    else
+        label = "Bake " + std::to_string(state.selected.size()) + (state.selected.size() == 1 ? " technique" : " techniques") + "  -  " + target;
+    label += "##export";
+
+    ImGui::Spacing();
+    const ImGuiStyle &style = ImGui::GetStyle();
+    ImGui::PushStyleColor(ImGuiCol_Button, style.Colors[ImGuiCol_ButtonHovered]);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, style.Colors[ImGuiCol_ButtonActive]);
+    if (ImGui::Button(label.c_str(), ImVec2(-FLT_MIN, ImGui::GetFrameHeight() * 1.6f)))
+        begin_export(state);
+    ImGui::PopStyleColor(2);
+    if (state.selected.empty())
+        ImGui::SetItemTooltip("Nothing is selected, so this writes an identity LUT and verifies the GPU round trip.");
+}
+
+void draw_progress(const runtime_state &state)
+{
+    ImGui::Spacing();
+    // A negative fraction draws ImGui's indeterminate animation: the number of
+    // compile retries and the GPU latency are not known in advance.
+    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, color_busy);
+    ImGui::ProgressBar(-1.0f * static_cast<float>(ImGui::GetTime()), ImVec2(-FLT_MIN, ImGui::GetFrameHeight() * 1.6f), state.status.c_str());
+    ImGui::PopStyleColor();
+}
+
+void metric_row(const char *label, const char *format, ...)
+{
+    ImGui::TableNextRow();
+    ImGui::TableNextColumn();
+    ImGui::TextDisabled("%s", label);
+    ImGui::TableNextColumn();
+    va_list args;
+    va_start(args, format);
+    ImGui::TextV(format, args);
+    va_end(args);
+}
+
+void draw_result(runtime_state &state)
+{
+    if (state.phase == operation_phase::ready)
+        return;
+
+    ImGui::SeparatorText("Result");
+    if (is_busy(state))
+    {
+        if (!state.detail.empty())
+            ImGui::TextWrapped("%s", state.detail.c_str());
+    }
+    else if (state.phase == operation_phase::error)
+    {
+        ImGui::TextColored(color_error, "%s", state.status.c_str());
+        if (!state.detail.empty())
+            ImGui::TextWrapped("%s", state.detail.c_str());
+    }
+    else if (state.phase == operation_phase::success)
+    {
+        ImGui::TextColored(color_success, "%s", state.status.c_str());
+        if (ImGui::BeginTable("##result", 2, ImGuiTableFlags_SizingFixedFit))
+        {
+            ImGui::TableSetupColumn("##key", ImGuiTableColumnFlags_WidthFixed, field_label_width() - ImGui::GetStyle().CellPadding.x * 2.0f);
+            ImGui::TableSetupColumn("##value", ImGuiTableColumnFlags_WidthStretch);
+            metric_row("File", "%s", state.last_output.filename().u8string().c_str());
+            metric_row("Format", "%s %s", lut_baker::output_format_name(state.last_format), lattice_label(state.last_lattice_size).c_str());
+            if (state.last_technique_count == 0)
+                metric_row("Techniques", "none (identity)");
+            else
+                metric_row("Techniques", "%zu", state.last_technique_count);
+            metric_row("Time", "%.3f s", state.last_duration_seconds);
+            ImGui::EndTable();
+        }
+    }
+
+    if (!state.warning.empty())
+    {
+        ImGui::PushStyleColor(ImGuiCol_Text, color_warning);
+        ImGui::TextWrapped("%s", state.warning.c_str());
+        ImGui::PopStyleColor();
+    }
+
+    if (state.identity_metrics_valid || state.rise_metrics_valid)
+    {
+        ImGui::SetNextItemOpen(true, ImGuiCond_Once);
+        if (ImGui::TreeNode("Validation metrics"))
+        {
+            if (ImGui::BeginTable("##metrics", 2, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg))
+            {
+                ImGui::TableSetupColumn("##key", ImGuiTableColumnFlags_WidthFixed);
+                ImGui::TableSetupColumn("##value", ImGuiTableColumnFlags_WidthStretch);
+                if (state.identity_metrics_valid)
+                {
+                    const auto &metrics = state.identity_metrics;
+                    metric_row("Identity error max/mean/RMS", "%.9g / %.9g / %.9g", metrics.maximum_absolute, metrics.mean_absolute, metrics.rms);
+                }
+                if (state.rise_metrics_valid)
+                {
+                    const auto &metrics = state.rise_metrics;
+                    metric_row("Source RGB range", "[%.9g, %.9g]", metrics.source_minimum, metrics.source_maximum);
+                    metric_row("Clipped components/samples", "%zu / %zu", metrics.clipped_components, metrics.clipped_samples);
+                    metric_row("8-bit quantization max/mean/RMS", "%.9g / %.9g / %.9g",
+                        metrics.quantization.maximum_absolute, metrics.quantization.mean_absolute, metrics.quantization.rms);
+                }
+                ImGui::EndTable();
+            }
+            if (state.rise_metrics_valid)
+                disabled_wrapped("Quantization error is measured after the range policy, separately from GPU identity error.");
+            ImGui::TreePop();
+        }
+    }
+
+    if (!state.last_output.empty() && !is_busy(state))
+    {
+        if (ImGui::Button("Open output folder"))
+            open_in_explorer(state.last_output.parent_path());
+        ImGui::SameLine();
+        if (ImGui::Button("Copy file name"))
+            ImGui::SetClipboardText(state.last_output.filename().u8string().c_str());
+        ImGui::SetItemTooltip(state.last_format == lut_baker::output_format::cube
+            ? "Copy the file name to paste into ReShadeLUTPreview.fx."
+            : "Copy the file name to the clipboard.");
     }
 }
 
@@ -1136,7 +1560,7 @@ void draw_overlay(effect_runtime *runtime)
     const std::shared_ptr<runtime_state> state = find_state(runtime);
     if (state == nullptr)
     {
-        ImGui::TextUnformatted("No active ReShade effect runtime is available.");
+        ImGui::TextDisabled("No active ReShade effect runtime is available.");
         return;
     }
 
@@ -1144,140 +1568,20 @@ void draw_overlay(effect_runtime *runtime)
     if (state->catalog_dirty && !state->export_pending)
         refresh_catalog(*state);
 
-    ImGui::TextUnformatted("ReShade LUT Baker");
-    ImGui::TextWrapped("Exports the combined RGB transformation of the selected techniques through an offscreen floating-point lattice. Selected technique states are never changed.");
-    ImGui::Spacing();
+    draw_header(*state);
 
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.72f, 0.25f, 1.0f));
-    ImGui::TextWrapped("Important: a 3D LUT cannot represent spatial, temporal, depth, random, dither or neighbor-dependent processing. The FP target creates an offscreen ReShade permutation with bake dimensions/format, BUFFER_COLOR_SPACE=0 and no separate sRGB SRV/RTV, so SRGBTexture/SRGBWriteEnabled behave linearly. BUFFER_*-conditional or sRGB-semantic techniques may differ from gameplay, especially in HDR. Other add-ons reacting to effect begin/finish events can also change subset rendering.");
-    ImGui::PopStyleColor();
-
-    if (state->source_buffer.valid)
-        ImGui::Text("Gameplay buffer: %s", source_buffer_description(*state).c_str());
-    else
-        ImGui::TextDisabled("Gameplay buffer: waiting for presentation data");
-
-    const bool busy = state->export_pending || state->submission_pending || state->writer_pending;
+    const bool busy = is_busy(*state);
     ImGui::BeginDisabled(busy);
-    ImGui::Spacing();
-    ImGui::TextUnformatted("Techniques to bake (real ReShade order)");
-    ImGui::SetNextItemWidth(-1.0f);
-    ImGui::InputTextWithHint("##technique_filter", "Filter techniques", state->technique_filter.data(), state->technique_filter.size());
-
-    if (ImGui::Button("Select currently enabled"))
-        state->selected = lut_baker::select_currently_enabled(state->techniques);
-    ImGui::SameLine();
-    if (ImGui::Button("Clear selection"))
-        state->selected.clear();
-    ImGui::SameLine();
-    if (ImGui::Button("Refresh Techniques"))
-    {
-        state->catalog_dirty = true;
-        refresh_catalog(*state);
-    }
-
-    ImGui::BeginChild("##techniques", ImVec2(0.0f, 260.0f), true);
-    std::string filter = state->technique_filter.data();
-    std::transform(filter.begin(), filter.end(), filter.begin(), [](const unsigned char value) { return static_cast<char>(std::tolower(value)); });
-    for (std::size_t index = 0; index < state->techniques.size(); ++index)
-    {
-        const technique_entry &entry = state->techniques[index];
-        const std::string label = technique_label(entry.key);
-        std::string searchable = label;
-        std::transform(searchable.begin(), searchable.end(), searchable.begin(), [](const unsigned char value) { return static_cast<char>(std::tolower(value)); });
-        if (!filter.empty() && searchable.find(filter) == std::string::npos)
-            continue;
-
-        bool checked = state->selected.find(entry.key) != state->selected.end();
-        ImGui::PushID(static_cast<int>(index));
-        ImGui::TextDisabled("%03zu", index + 1);
-        ImGui::SameLine();
-        if (ImGui::Checkbox("##selected", &checked))
-        {
-            if (checked)
-                state->selected.insert(entry.key);
-            else
-                state->selected.erase(entry.key);
-        }
-        ImGui::SameLine();
-        ImGui::TextUnformatted(label.c_str());
-        if (!entry.enabled)
-        {
-            ImGui::SameLine();
-            ImGui::TextDisabled("(currently disabled)");
-        }
-        ImGui::PopID();
-    }
-    if (state->techniques.empty())
-        ImGui::TextDisabled("No techniques are currently available. Reload ReShade effects, then refresh.");
-    ImGui::EndChild();
-
-    const std::size_t selected_count = state->selected.size();
-    ImGui::Text("Selected: %zu", selected_count);
-    if (selected_count == 0)
-        ImGui::TextDisabled("Exporting with no selection performs the GPU identity validation test.");
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::TextUnformatted("Export");
-    const char *format_labels[] = { "CUBE (.cube)", "Monster Hunter Rise (.tex.28)" };
-    int format_index = state->preferences.format == lut_baker::output_format::cube ? 0 : 1;
-    ImGui::SetNextItemWidth(280.0f);
-    if (ImGui::Combo("Output format", &format_index, format_labels, IM_ARRAYSIZE(format_labels)))
-    {
-        const auto next = format_index == 0 ? lut_baker::output_format::cube : lut_baker::output_format::rise_tex;
-        const std::string filename = lut_baker::filename_for_format(state->output_filename.data(), state->preferences.format, next);
-        if (filename.size() < state->output_filename.size())
-        {
-            state->output_filename.fill('\0');
-            std::copy(filename.begin(), filename.end(), state->output_filename.begin());
-        }
-        state->preferences.format = next;
-    }
-    if (state->preferences.format == lut_baker::output_format::cube)
-    {
-        const char *size_labels[] = { "16", "32", "64" };
-        int size_index = state->preferences.cube_size == 16 ? 0 : state->preferences.cube_size == 32 ? 1 : 2;
-        ImGui::SetNextItemWidth(100.0f);
-        if (ImGui::Combo("LUT Size", &size_index, size_labels, IM_ARRAYSIZE(size_labels)))
-            state->preferences.cube_size = size_index == 0 ? 16u : size_index == 1 ? 32u : 64u;
-    }
-    else
-    {
-        ImGui::TextUnformatted("LUT size: 32 x 32 x 32 (automatic) | 8 bits per RGB channel");
-        ImGui::TextWrapped("Rise TEX stores only normalized RGB. Out-of-range values are rejected by default. No gamma conversion is applied. Native loading and visual equivalence must be tested in Rise; the CUBE preview cannot load TEX.");
-        bool clamp = state->preferences.rise_range == lut_baker::range_policy::clamp;
-        if (ImGui::Checkbox("Clamp to 0-1", &clamp))
-            state->preferences.rise_range = clamp ? lut_baker::range_policy::clamp : lut_baker::range_policy::reject;
-        if (clamp)
-            ImGui::TextWrapped("Explicit clipping discards RGB below 0 or above 1. The result reports the original range and affected component/sample counts.");
-    }
-    ImGui::SetNextItemWidth(-1.0f);
-    ImGui::InputTextWithHint("Output filename", "automatic timestamp", state->output_filename.data(), state->output_filename.size());
-    if (state->output_filename[0] == '\0')
-        ImGui::TextDisabled("ReShade_LUT_YYYYMMDD_HHMMSS%s", lut_baker::output_extension(state->preferences.format));
-    else
-    {
-        std::string normalized, error;
-        if (lut_baker::validate_output_filename(state->output_filename.data(), normalized, error, state->preferences.format))
-            ImGui::TextDisabled("%s", normalized.c_str());
-        else
-            ImGui::TextWrapped("%s", error.c_str());
-    }
-    if (ImGui::Button("Export LUT", ImVec2(-1.0f, 0.0f)))
-        begin_export(*state);
+    draw_technique_list(*state);
+    draw_output_settings(*state);
     ImGui::EndDisabled();
 
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-    draw_status(*state);
+    if (busy)
+        draw_progress(*state);
+    else
+        draw_export_button(*state);
 
-    if (!state->last_output.empty())
-    {
-        if (ImGui::Button("Open Output Folder"))
-            ShellExecuteW(nullptr, L"open", state->last_output.parent_path().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-    }
+    draw_result(*state);
 }
 
 void register_callbacks()

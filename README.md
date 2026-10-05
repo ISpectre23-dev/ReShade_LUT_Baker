@@ -2,7 +2,7 @@
 
 ReShade LUT Baker is a ReShade add-on that exports the combined color grading of selected techniques as a 3D lookup table (LUT).
 
-Version **1.1.0** exports floating-point **CUBE**, compatibility **PNG**, and native **Monster Hunter Rise `.tex.28`** files from the same floating-point bake. CUBE 64³ remains the default. PNG converts only the final CPU result to 8 bits per color channel by default, or optionally 16 bits. Rise remains 8-bit. Native Rise loading and visual SDR/HDR equivalence still require in-game testing.
+Version **1.1.0** exports floating-point **CUBE**, compatibility **PNG**, native **Monster Hunter Rise `.tex.28`**, and **Monster Hunter Wilds `.tex.241106027`** files from the same floating-point bake. CUBE 64³ remains the default. PNG converts only the final CPU result to 8 bits per color channel by default, or optionally 16 bits. Rise remains 8-bit. Wilds uses a fixed 33³ table with 16-bit floating-point channels and lossless compression. Wilds exports have been reported working in-game. Visual equivalence across presets and SDR/HDR still requires separate testing.
 
 It evaluates a neutral RGB lattice directly through ReShade, preserving the real technique execution order and avoiding screenshot, PNG, DDS, or other image intermediates. The default export is a 64³ LUT containing 262,144 RGB samples.
 
@@ -15,12 +15,13 @@ Unsaved shader parameters, technique states and order are backed up in memory be
 - Exports standard floating-point `.cube` 3D LUT files.
 - Exports 8-bit or 16-bit PNG lookup tables as Horizontal strip or Square tiles. PNG defaults to 8-bit.
 - Exports the verified Monster Hunter Rise 32³ RGBA8 `.tex.28` profile directly, without a converter or image intermediary.
+- Exports the observed Wilds 33³ RGBA16F `.tex.241106027` profile with GDeflate compression. No automatic game-specific color-domain conversion is applied.
 - CUBE 64³ by default, with 16³, 32³, 128³ and Custom sizes from 2 to 128.
 - Uses ReShade's actual relative technique order.
 - Supports baking disabled techniques, restoring their state before rendering.
 - Preserves unsaved parameters, technique states and execution order across bake-triggered compilation.
 - Uses an RGBA32F bake target when available, with RGBA16F as an explicit fallback.
-- Preserves finite shader output below 0 and above 1 in CUBE; PNG and Rise reject it unless explicit clipping is enabled.
+- Preserves finite shader output below 0 and above 1 in CUBE and within the 16-bit float range in Wilds. PNG and Rise reject it unless explicit clipping is enabled.
 - Shows a conservative file budget and checks free space before baking and writing.
 - Verifies the expected ReShade technique execution sequence before writing a LUT.
 - Uses GPU completion fences before readback.
@@ -71,8 +72,8 @@ ReShade must be installed in a configuration that permits third-party add-ons. I
 1. Configure the grading techniques and their uniforms as desired.
 2. Open **Add-ons > ReShade LUT Baker**.
 3. Under **Techniques**, tick exactly the techniques to bake (click the checkbox or anywhere on the row). They are listed in ReShade execution order; the **Active** dot shows whether each one is currently enabled in ReShade.
-4. Under **Output**, pick **CUBE** or **PNG** from **Common formats**, or **Monster Hunter Rise** from **Games**. CUBE offers 16³, 32³, 64³, 128³ and **Custom**. PNG has a separate size preference, a **Layout** selector and **Bit depth** (8-bit by default, optionally 16-bit). Rise always uses 32³. Switching formats preserves the other formats' preferences.
-5. Optionally enter a **File name** (basename or complete matching suffix). The line below the field shows the exact name that will be written. Leaving it empty creates `ReShade_LUT_YYYYMMDD_HHMMSS.cube`, `.png` or `.tex.28`.
+4. Under **Output**, pick **CUBE** or **PNG** from **Common formats**, or **Monster Hunter Rise** / **Monster Hunter Wilds** from **Games**. CUBE offers 16³, 32³, 64³, 128³ and **Custom**. PNG has a separate size preference, a **Layout** selector and **Bit depth** (8-bit by default, optionally 16-bit). Rise always uses 32³; Wilds always uses 33³. Switching formats preserves the other formats' preferences.
+5. Optionally enter a **File name** (basename or complete matching suffix). The line below the field shows the exact name that will be written. Leaving it empty creates `ReShade_LUT_YYYYMMDD_HHMMSS.cube`, `.png`, `.tex.28` or `.tex.241106027`.
 6. Press the bake button. Its label states what will be written, for example **Bake 3 techniques - CUBE 64x64x64**. With nothing selected it reads **Export identity LUT (GPU validation)**.
 
 **Select active** replaces the current selection with exactly the techniques that are enabled at that moment, **Clear** deselects everything and **Refresh** re-reads the technique list. The filter field narrows the list by effect or technique name without changing the selection.
@@ -108,6 +109,8 @@ Exports are written to:
 Existing exports are not overwritten. If a requested filename already exists, a numeric suffix such as `_001` is added automatically.
 
 For Rise the full suffix is retained: `MyGrade.tex.28`, then `MyGrade_001.tex.28`. A collision during the final atomic commit fails explicitly, never overwrites. Format, effective size, PNG layout/bit depth, name, output directory and range policy are captured when the request is queued. Editing preferences cannot change an active export.
+
+Wilds also retains its full suffix: `MyGrade.tex.241106027`, then `MyGrade_001.tex.241106027`. Only the requested export is written; no alternate LUT or sidecar is generated.
 
 Each CUBE file contains:
 
@@ -186,6 +189,18 @@ External loading requires REFramework's **Enable Loose File Loader**. The publis
 
 The profile is backed by inspected native neutral/Color Boost textures and offline numerical evidence, but no file from this new exporter has yet been tested in Rise. Start with an identity and an asymmetric axes fixture using an authorized loading path when available, then compare a real RGB grading. Disable the original ReShade grading while applying the native TEX, keep other overrides fixed and neutralize participating original engine LUTs to avoid double grading/mixing. Check primaries, ramps, shadows, skin and highlights in SDR first, then HDR independently. The engine applies LUTs at a different render stage and may blend scene LUTs; valid bytes do not prove the same look. HDR is not disabled or presumed equivalent.
 
+### Monster Hunter Wilds output
+
+Choose **Monster Hunter Wilds** for a direct **33 × 33 × 33** bake. The file uses TEX version **241106027**, **RGBA16F** (four 16-bit floating-point channels), and **GDeflate**, a lossless compression format. It reproduces the single-mip profile observed in Wilds 1.42.0.2 map/event LUTs, including 512-byte row pitch and a 557,568-byte decoded payload. The compressed file size varies. See [the measured binary profile](docs/WILDS_TEX241106027.md).
+
+RGB values are converted directly from the floating-point readback to 16-bit float with round-to-nearest-even. Negative and super-white values are preserved within **[-65504, 65504]**. Non-finite values and values outside that range fail without writing. Alpha is always one; padding is zero. No clamping, gamma conversion or integer intermediate is used. The result reports float rounding error separately from GPU identity error. Compression is verified by a complete decode and byte comparison before the atomic write.
+
+**The game's color domain is not automatically converted.** The examined Wilds shader references sample their LUTs in a logarithmic domain, not necessarily the RGB domain used by your ReShade grading. The panel and export result show this warning. A structurally valid export can therefore look different when applied inside the game. There is no guessed inverse tonemapping, automatic LogC conversion or claim of a 1:1 match in SDR/HDR.
+
+The add-on writes the selected file to `LUT_Bakes`; it does not install it or modify the game. Use a Wilds LUT manager that explicitly accepts the 33³ RGBA16F/GDeflate profile. The physical filename must retain `.tex.241106027`; the loader's logical resource path normally ends in `.tex`. Consult that manager's installation instructions rather than copying the file to a guessed path. The game also contains a different 32³ RGBA8 neutral profile; renaming a Rise TEX or mixing those profiles is not a conversion.
+
+**Validate new exports in-game.** First export with no techniques selected and validate the numeric identity. Load it into one participating game slot, with the original ReShade grading disabled, and test reversible replacement. Then test a real RGB-only grading and the participating slot blends. Keep other engine settings fixed. Compare SDR first and HDR separately. A zero-error numeric identity does not establish visual neutrality after the engine's color-domain conversions.
+
 ## Accuracy and technical limitations
 
 ### Bake target and effect permutations
@@ -201,6 +216,8 @@ For the default 64³ LUT, the identity lattice is flattened into a 512 × 512 fl
 ```
 
 Rise instead starts with a 32³ lattice (flattened to 256 × 128), follows the **same floating-point GPU path**, then quantizes and writes TEX on the CPU worker. There is no 8/10-bit bake intermediate or resampling from 64³.
+
+Wilds starts with a 33³ lattice (297 × 121), follows that same GPU path, then converts to RGBA16F, pads rows and compresses on the CPU worker. The compression codec is linked into the add-on; exporting does not require DirectStorage DLLs from a game installation.
 
 A custom floating-point render target causes ReShade 6.8.0 to compile a custom effect permutation for the bake target. Its built-ins describe the bake resource rather than the gameplay back buffer:
 
@@ -247,6 +264,7 @@ The repository includes both runtime and offline validation paths:
 - `tools/validate_cube.py compare` compares every lattice node of two generated LUTs and reports maximum, mean and RMS RGB error.
 - `tools/validate_rise_tex.py inspect` checks the exact Rise profile, byte count and alpha. `identity` measures against ideal nodes; `compare-cube` compares TEX nodes against a matching 32³ float CUBE, optionally with explicit `--clamp`.
 - `tools/validate_png.py` decodes and checks PNG files using only Python's standard library. Specify `--layout horizontal` or `--layout square`; dimensions alone cannot distinguish Square tiles from Hald.
+- `tools/validate_wilds_tex.py` checks the Wilds container and decompressed RGBA16F nodes. `identity` reports numeric errors; `compare-cube` verifies every node against an independently rounded 33³ CUBE. Use the built `wilds_tex_validate.exe` or explicitly choose a trusted Microsoft codec with `--codec`. Neither test establishes native loading or visual equivalence.
 
 Examples:
 
@@ -257,6 +275,8 @@ python tools/validate_cube.py compare reference.cube candidate.cube --tolerance 
 python tools/validate_rise_tex.py inspect MyGrade.tex.28
 python tools/validate_rise_tex.py identity Identity32.tex.28
 python tools/validate_rise_tex.py compare-cube MyGrade.tex.28 MyGrade.cube
+python -B tools/validate_wilds_tex.py identity Identity33.tex.241106027
+python -B tools/validate_wilds_tex.py compare-cube MyGrade.tex.241106027 MyGrade33.cube
 ```
 
 Offline metrics measure values at lattice nodes. Differences between lattice nodes also include 3D-LUT interpolation and approximation error, which are separate from exporter readback error.
@@ -295,3 +315,5 @@ The implementation follows the official ReShade 6.8.0 source and headers:
 ## License
 
 ReShade LUT Baker is available under the [MIT License](LICENSE).
+
+The statically linked compression dependencies retain their own licenses. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md); release packages include the unmodified upstream license texts.

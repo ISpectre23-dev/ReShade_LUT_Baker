@@ -39,3 +39,24 @@ The queued request owns format, effective size, basename/directory and range pol
 4. Calibrate in SDR first, then HDR independently. Engine application stage, scene LUT mixing and the existing offscreen `BUFFER_*`/sRGB-view caveats can change the result. Native loading and visual equivalence have **not** been validated in this pass.
 
 No game installation, mod/ZIP or Rise Rehydrated source was modified.
+
+## Wilds export addition, 2026-10-05
+
+This entry records the later Wilds work on `dev`, not a retest of the historical
+in-game steps above. The release version remains 1.1.0.
+
+- Clean x64 Release build with MSVC 19.51 and the pinned dependencies. No compiler or linker warnings. CTest: **10/10 groups passed**. Python discovery: **28/28 unit tests passed**.
+- Added one fixed export profile: TEX 241106027, 33³, RGBA16F, one mip, 512-byte rows and a 557,568-byte decoded payload. No game asset or DLL is distributed.
+- The bounded native decoder accepted all eleven RGBA16F map/event textures from the supplied local research. Their first 56 bytes match the writer profile. The separate 32³ RGBA8 neutral is intentionally not this export target.
+- The actual writer's identity and asymmetric files were decoded independently with the trusted Microsoft DirectStorage codec from the user's installation. Its DLL signature was valid. Every asymmetric RGB node matched an independently rounded 33³ CUBE. Tests do not depend on that installation; their standard backend is the built CPU decoder.
+- Numeric identity maximum/mean/RMS: **0 / 0 / 0**. Steps of 1/32 are exactly representable in binary16.
+- Asymmetric fixture rounding maximum/mean/RMS against the actual binary32 inputs: **0.000195324420929 / 0.0000515386198807 / 0.0000813754079875**. The fixture maps `(r,g,b)` to `(-0.125+1.5*b, 0.1+0.8*r*r, 0.025+0.9*g)`; it is writer validation data, not a grading shader.
+- Regression coverage includes all header fields, tile offsets/sizes, truncated files, opaque alpha, row padding, exact half inputs, ties/subnormals, non-finite/overflow rejection, negative/super-white preservation, low-compressibility data, atomic non-overwriting output, compound suffix collisions and immutable format snapshots.
+- Existing GPU allocation/rendering, technique ordering/selection, synchronization, readback and live-settings recovery paths are unchanged. CUBE, PNG and Rise serialization sources are unchanged.
+
+Native game loading, GPU execution at the new size, color-domain equivalence and
+SDR/HDR visual comparisons have **not** been tested in this pass. The UI and
+result warn that the numeric export does not convert the ReShade grading into
+the logarithmic domain seen in the examined Wilds shader references. Use the
+manual checks in [BUILDING.md](../BUILDING.md) before claiming native visual
+support. No game installation was modified and no game process was launched.

@@ -1,4 +1,5 @@
 #include "export_settings.hpp"
+#include "wilds_tex.hpp"
 
 #include <Windows.h>
 
@@ -28,18 +29,22 @@ namespace lut_baker
 {
 const char *output_extension(const output_format format) noexcept
 {
-    return format == output_format::png ? ".png" : format == output_format::rise_tex ? ".tex.28" : ".cube";
+    return format == output_format::wilds_tex ? ".tex.241106027" :
+        format == output_format::png ? ".png" : format == output_format::rise_tex ? ".tex.28" : ".cube";
 }
 
 const char *output_format_name(const output_format format) noexcept
 {
-    return format == output_format::png ? "PNG" : format == output_format::rise_tex ? "Monster Hunter Rise TEX" : "CUBE";
+    return format == output_format::wilds_tex ? "Monster Hunter Wilds TEX" :
+        format == output_format::png ? "PNG" : format == output_format::rise_tex ? "Monster Hunter Rise TEX" : "CUBE";
 }
 
 std::uint32_t effective_lattice_size(const export_preferences &preferences) noexcept
 {
     if (preferences.format == output_format::rise_tex)
         return 32;
+    if (preferences.format == output_format::wilds_tex)
+        return wilds_lut_size;
     if (preferences.format == output_format::png)
         return preferences.png_size;
     return preferences.cube_custom
@@ -98,7 +103,7 @@ bool validate_output_filename(const std::string_view value, std::string &normali
         return false;
     }
     const auto basename = normalized.substr(0, normalized.size() - suffix.size());
-    for (const char *const other_suffix : { ".cube", ".png", ".tex.28" })
+    for (const char *const other_suffix : { ".cube", ".png", ".tex.28", ".tex.241106027" })
     {
         if (suffix != other_suffix && ends_with(basename, other_suffix))
         {
@@ -193,11 +198,14 @@ bool snapshot_export_request(const export_preferences &preferences, const std::s
 
 bool validate_export_preferences(const export_preferences &preferences, std::string &error)
 {
-    if (preferences.format != output_format::cube && preferences.format != output_format::rise_tex && preferences.format != output_format::png)
+    if (preferences.format != output_format::cube && preferences.format != output_format::rise_tex &&
+        preferences.format != output_format::png && preferences.format != output_format::wilds_tex)
     {
-        error = "Unknown export format. Choose CUBE, PNG or Monster Hunter Rise.";
+        error = "Unknown export format. Choose CUBE, PNG, Monster Hunter Rise or Monster Hunter Wilds.";
         return false;
     }
+    if (preferences.format == output_format::wilds_tex)
+        return true; // Fixed float profile; no integer range/clamp preference.
     if (preferences.format == output_format::cube)
     {
         if (preferences.cube_custom ? preferences.custom_cube_size < 2 || preferences.custom_cube_size > 128 : !preset_size(preferences.cube_size))
@@ -255,6 +263,11 @@ bool estimate_export(const export_request &request, export_estimate &estimate, s
         if (request.lattice_size != 32)
             break;
         estimate.file_bytes = 56 + estimate.samples * 4;
+        return true;
+    case output_format::wilds_tex:
+        if (request.lattice_size != wilds_lut_size)
+            break;
+        estimate.file_bytes = wilds_file_budget;
         return true;
     case output_format::png:
         if (!valid_png_bit_depth(request.png_depth))

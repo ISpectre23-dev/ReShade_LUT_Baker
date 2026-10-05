@@ -11,6 +11,8 @@ from test_validate_rise_tex import asymmetric_samples, float32, reference_bytes
 from validate_cube import identity_samples, load_cube, measure
 from validate_rise_tex import compare_cube, load_rise_tex
 from validate_png import load_png
+from validate_wilds_tex import load_wilds_tex, compare_cube as compare_wilds_cube
+from test_validate_wilds_tex import reference_payload as wilds_reference_payload, asymmetric_samples as wilds_asymmetric_samples
 
 
 def check_large_identity(path, size):
@@ -73,6 +75,14 @@ def main():
             quant = compare_cube(tex, directory / f"{basename}.cube")
             assert quant.maximum_absolute <= 0.5 / 255.0 + 1e-8
             print(f"{basename}: C++ writer matches all reference bytes; TEX vs float CUBE max/mean/RMS "
+                  f"{quant.maximum_absolute:.12g} / {quant.mean_absolute:.12g} / {quant.rms:.12g}")
+        for basename, samples in (("Identity33", identity_samples(33)), ("Asymmetric33", wilds_asymmetric_samples())):
+            tex = load_wilds_tex(directory / f"{basename}.tex.241106027", pathlib.Path(sys.argv[2]))
+            assert tex.payload == wilds_reference_payload(samples), "Wilds axis/channel/FP16/padding reference failed"
+            quant = compare_wilds_cube(tex, directory / f"{basename}.cube")
+            if basename == "Identity33":
+                assert quant.maximum_absolute == quant.mean_absolute == quant.rms == 0
+            print(f"{basename} Wilds: every decoded byte matches independent Python half precision; max/mean/RMS "
                   f"{quant.maximum_absolute:.12g} / {quant.mean_absolute:.12g} / {quant.rms:.12g}")
         for size in (16, 32, 64, 128):
             for layout in ("horizontal", "square"):

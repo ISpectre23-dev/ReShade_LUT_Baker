@@ -1,5 +1,6 @@
 #include "cube_lut.hpp"
 #include "export_settings.hpp"
+#include "wilds_tex.hpp"
 
 #include <filesystem>
 #include <iostream>
@@ -72,6 +73,12 @@ int main()
     preferences.format = output_format::rise_tex;
     preferences.rise_range = range_policy::reject;
     expect(snapshot_export_request(preferences, "rise", directory, request, error) && request.lattice_size == 32 && request.range == range_policy::reject, "Rise size and policy unchanged");
+    preferences.format = output_format::wilds_tex;
+    preferences.rise_range = range_policy::clamp;
+    expect(snapshot_export_request(preferences, "wilds", directory, request, error) && request.lattice_size == 33 &&
+        request.range == range_policy::reject && request.filename == "wilds.tex.241106027", "Wilds fixed size and suffix, no Rise/PNG clamping");
+    const auto wilds_snapshot = request;
+    preferences.rise_range = range_policy::reject;
     preferences.format = output_format::cube;
     expect(snapshot_export_request(preferences, "back", directory, request, error) && request.lattice_size == 65 && request.range == range_policy::reject, "custom CUBE choice preserved across format switches");
     preferences.format = output_format::png;
@@ -83,7 +90,25 @@ int main()
     expect(validate_output_filename("lut", filename, error, output_format::png) && filename == "lut.png", "PNG extension added");
     expect(!validate_output_filename("lut.PNG", filename, error, output_format::png) && !validate_output_filename("lut.cube.png", filename, error, output_format::png), "wrong and doubled extensions rejected");
     expect(filename_for_format("lut.png", output_format::png, output_format::cube) == "lut.cube" && filename_for_format("lut.tex.28", output_format::rise_tex, output_format::png) == "lut.png", "all format suffixes switch cleanly");
+    for (const auto format : { output_format::cube, output_format::png, output_format::rise_tex, output_format::wilds_tex })
+    {
+        const auto suffix = std::string(output_extension(format));
+        expect(filename_for_format("lut.tex.241106027", output_format::wilds_tex, format) == "lut" + suffix &&
+            filename_for_format("lut" + suffix, format, output_format::wilds_tex) == "lut.tex.241106027", "Wilds compound suffix switches in both directions");
+        if (format != output_format::wilds_tex)
+            expect(!validate_output_filename("lut.tex.241106027" + suffix, filename, error, format), "other format cannot retain Wilds suffix in basename");
+    }
+    expect(validate_output_filename("lut", filename, error, output_format::wilds_tex) && filename == "lut.tex.241106027", "Wilds basename gets full suffix");
+    expect(!validate_output_filename("lut.tex.28.tex.241106027", filename, error, output_format::wilds_tex), "Rise/Wilds double extension rejected");
+    expect(validate_output_filename("", filename, error, output_format::wilds_tex) && filename.find(".tex.241106027") != std::string::npos, "Wilds timestamp has matching suffix");
+    expect(wilds_snapshot.format == output_format::wilds_tex && wilds_snapshot.lattice_size == 33 &&
+        wilds_snapshot.filename == "wilds.tex.241106027" && wilds_snapshot.range == range_policy::reject, "Wilds snapshot survives subsequent preference changes");
     export_estimate estimate;
+    expect(estimate_export(wilds_snapshot, estimate, error) && estimate.samples == 35937 && estimate.float_buffer_bytes == 574992 &&
+        estimate.file_bytes == wilds_file_budget, "Wilds CPU/GPU/file budget is fixed and includes compression overhead");
+    request = wilds_snapshot;
+    request.lattice_size = 32;
+    expect(!estimate_export(request, estimate, error), "Wilds wrong size rejected before GPU allocation");
     request = custom_snapshot;
     request.lattice_size = 128;
     expect(estimate_export(request, estimate, error) && estimate.samples == 2097152 && estimate.float_buffer_bytes == 33554432 && estimate.file_bytes >= 100663296, "128 memory and disk budget");

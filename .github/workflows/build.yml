@@ -37,11 +37,25 @@ jobs:
             build/Release/ReShadeLUTBaker.addon64
             README.md
             LICENSE
+            THIRD_PARTY_NOTICES.md
+            build/Release/licenses/
           if-no-files-found: error
 
-      - name: Upload synthetic CUBE PNG and Rise validation fixtures
+      - name: Upload synthetic CUBE PNG Rise and Wilds validation fixtures
         uses: actions/upload-artifact@v4
         with:
           name: ReShadeLUTBaker-validation-fixtures
           path: build/fixtures/
+          if-no-files-found: error
+
+      - name: Upload Wilds validation tools
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReShadeLUTBaker-Wilds-validation-tools
+          path: |
+            build/Release/wilds_tex_validate.exe
+            tools/validate_wilds_tex.py
+            tools/validate_cube.py
+            THIRD_PARTY_NOTICES.md
+            build/Release/licenses/
           if-no-files-found: error

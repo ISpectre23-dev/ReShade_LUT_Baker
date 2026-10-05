@@ -7,7 +7,7 @@
 
 namespace lut_baker
 {
-enum class output_format { cube, rise_tex, png };
+enum class output_format { cube, rise_tex, png, wilds_tex };
 enum class range_policy { reject, clamp };
 enum class png_layout { horizontal, square };
 enum class png_bit_depth { eight = 8, sixteen = 16 };

@@ -24,6 +24,7 @@ CMakeUserPresets.json
 /LUT_Bakes/
 *.cube
 *.tex.28
+*.tex.241106027
 __pycache__/
 *.py[cod]
 

@@ -113,6 +113,7 @@ struct export_result
     std::uint32_t lattice_size = 0;
     lut_baker::quantization_metrics quantized_metrics;
     lut_baker::png_layout png_distribution = lut_baker::png_layout::horizontal;
+    lut_baker::png_bit_depth png_depth = lut_baker::png_bit_depth::eight;
     std::vector<std::string> verified_techniques;
     std::string error;
     std::string warning;
@@ -147,6 +148,7 @@ struct runtime_state
     lut_baker::quantization_metrics quantized_metrics;
     bool quantized_metrics_valid = false;
     lut_baker::png_layout last_png_distribution = lut_baker::png_layout::horizontal;
+    lut_baker::png_bit_depth last_png_depth = lut_baker::png_bit_depth::eight;
 
     bool export_pending = false;
     technique_selection requested;
@@ -392,7 +394,7 @@ public:
                 case format::r16_sint: uniform.type = lut_baker::uniform_value_type::sint16; break;
                 case format::r16_uint: uniform.type = lut_baker::uniform_value_type::uint16; break;
                 case format::r16_float: uniform.type = lut_baker::uniform_value_type::real16; break;
-                default: throw std::runtime_error("A shader parameter has an unsupported public API type.");
+                default: throw std::runtime_error("A shader parameter has a type that cannot be backed up.");
                 }
                 const std::size_t count = lut_baker::uniform_component_count(uniform);
                 if (count == 0 || count > lut_baker::settings_word_limit - words)
@@ -500,7 +502,7 @@ private:
     void check_bindings() const
     {
         if (generation_ != bindings_generation_ || current_preset_path(runtime_) != bindings_preset_)
-            throw std::runtime_error("The preset or effect catalog changed during settings recovery. No further values were applied to the new context.");
+            throw std::runtime_error("The preset or effect list changed during settings recovery. No further values were applied to the new context.");
     }
     effect_runtime *runtime_;
     const std::uint64_t &generation_;
@@ -919,6 +921,7 @@ export_result execute_export_job(export_job job) noexcept
     result.format = job.request.format;
     result.lattice_size = job.request.lattice_size;
     result.png_distribution = job.request.png_distribution;
+    result.png_depth = job.request.png_depth;
     result.warning = std::move(job.initial_warning);
 
     try
@@ -950,7 +953,7 @@ export_result execute_export_job(export_job job) noexcept
             break;
         case lut_baker::output_format::png:
             written = lut_baker::write_png_lut_atomic(result.output, job.request.lattice_size, job.samples,
-                job.request.png_distribution, job.request.range, job.metadata, result.quantized_metrics, error);
+                job.request.png_distribution, job.request.range, job.metadata, result.quantized_metrics, error, job.request.png_depth);
             break;
         }
         if (!written)
@@ -1091,6 +1094,7 @@ bool poll_export_writer(runtime_state &state)
     state.quantized_metrics_valid = result.format != lut_baker::output_format::cube;
     state.quantized_metrics = result.quantized_metrics;
     state.last_png_distribution = result.png_distribution;
+    state.last_png_depth = result.png_depth;
     state.last_duration_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - state.request_started).count();
 
     std::ostringstream detail;
@@ -1099,7 +1103,8 @@ bool poll_export_writer(runtime_state &state)
            << std::fixed << std::setprecision(3) << state.last_duration_seconds << " s";
     state.detail = detail.str();
     if (result.format == lut_baker::output_format::png)
-        state.detail += std::string(" | ") + lut_baker::png_layout_name(result.png_distribution) + " | 8 bits per channel";
+        state.detail += std::string(" | ") + lut_baker::png_layout_name(result.png_distribution) + " | " +
+            std::to_string(static_cast<unsigned int>(result.png_depth)) + " bits per channel";
     if (!state.warning.empty())
         log_message(reshade::log::level::warning, state.warning);
     log_message(reshade::log::level::info, "Exported " + result.output.u8string());
@@ -1112,6 +1117,8 @@ bool poll_export_writer(runtime_state &state)
                 << "; clipped " << metrics.clipped_components << " components in " << metrics.clipped_samples << " samples"
                 << "; quantization max/mean/RMS " << metrics.quantization.maximum_absolute << "/"
                 << metrics.quantization.mean_absolute << "/" << metrics.quantization.rms;
+        if (result.format == lut_baker::output_format::png)
+            message << "; " << static_cast<unsigned int>(result.png_depth) << " bits per channel";
         log_message(reshade::log::level::info, message.str());
         for (std::size_t index = 0; index < result.verified_techniques.size(); ++index)
             log_message(reshade::log::level::info, std::string(lut_baker::output_format_name(result.format)) + " technique " + std::to_string(index + 1) + ": " + result.verified_techniques[index]);
@@ -1125,7 +1132,7 @@ void set_compile_progress(runtime_state &state)
     if (state.bake_control.initializing())
     {
         state.status = "Preparing shader resources";
-        state.detail = "ReShade is initializing the shader's normal resources before the floating-point bake. Its original disabled state has already been restored. Technique: " +
+        state.detail = "ReShade is initializing the shader's resources before the floating-point bake. Its original disabled state has already been restored. Technique: " +
             technique_label(state.bake_control.waiting_key());
         return;
     }
@@ -1260,7 +1267,7 @@ void process_bake(runtime_state &state, command_queue *present_queue)
         }
         if (preparation == lut_baker::technique_preparation::rejected)
         {
-            set_failure(state, "ReShade could not prepare the normal resources of " + technique_label(entry.key) +
+            set_failure(state, "ReShade could not prepare the resources of " + technique_label(entry.key) +
                 ". No LUT was written. Check ReShade.log for a shader/resource error or another add-on blocking initialization, then reload the effect before retrying.");
             return;
         }
@@ -1268,7 +1275,7 @@ void process_bake(runtime_state &state, command_queue *present_queue)
         {
             if (!state.bake_control.wait_for_initialization(entry.key, preparation_generation))
             {
-                set_failure(state, "The normal resources of " + technique_label(entry.key) +
+                set_failure(state, "The resources of " + technique_label(entry.key) +
                     " are still unavailable after initialization. No LUT was written and no further retry will be made. Check ReShade.log and reload the effect before retrying.");
                 return;
             }
@@ -1387,7 +1394,7 @@ void begin_export(runtime_state &state)
     {
         state.phase = operation_phase::error;
         state.status = "ReShade is still loading effects";
-        state.detail = "No bake was queued. Wait for shader loading to finish before exporting grading.";
+        state.detail = "No bake was queued. Wait for ReShade to finish loading effects, then try again.";
         return;
     }
 
@@ -1556,7 +1563,7 @@ void on_reloaded_effects(effect_runtime *runtime)
         if (!available)
         {
             state->settings_backup.clear();
-            set_failure(*state, "The effect catalog was explicitly reloaded/replaced before settings recovery completed. No LUT was written. The old backup was discarded to avoid applying it to different effects; configure the reloaded effects before retrying.");
+            set_failure(*state, "The effect list was explicitly reloaded/replaced before settings recovery completed. No LUT was written. The old backup was discarded to avoid applying it to different effects; configure the reloaded effects before retrying.");
             return;
         }
         restore_settings_when_ready(*state);
@@ -1831,20 +1838,21 @@ void draw_technique_list(runtime_state &state)
     }
 }
 
-// Add new targets here; the Format dropdown is generated from this list.
+// List common formats first, then game-specific targets. This list builds the dropdown.
 struct output_format_option
 {
     lut_baker::output_format format;
     const char *name;
     const char *short_name; // Used on the bake button.
     const char *extension;
+    bool game_specific;
     const char *description;
 };
 
 const output_format_option format_options[] = {
-    { lut_baker::output_format::cube, "CUBE", "CUBE", ".cube", "A 3D lookup table (.cube). Float values are preserved, including values outside 0-1. Choose 16, 32, 64, 128 or a custom size from 2 to 128. Loadable by ReShadeLUTPreview.fx." },
-    { lut_baker::output_format::rise_tex, "Monster Hunter Rise", "Rise TEX", ".tex.28", "Native Monster Hunter Rise LUT (TEX v28). Fixed 32x32x32, 8 bits per channel; values limited to 0-1." },
-    { lut_baker::output_format::png, "PNG", "PNG", ".png", "A 3D lookup table stored in a PNG image for compatible shaders. The file uses 8 bits per channel and values in 0-1. Choose Horizontal strip or Square tiles. Not loadable by ReShadeLUTPreview.fx." },
+    { lut_baker::output_format::cube, "CUBE", "CUBE", ".cube", false, "A 3D lookup table (.cube). Float values are preserved, including values outside 0-1. Choose 16, 32, 64, 128 or a custom size from 2 to 128." },
+    { lut_baker::output_format::png, "PNG", "PNG", ".png", false, "A 3D lookup table stored in a PNG image. Choose 8 or 16 bits per channel, with values in 0-1. Choose Horizontal strip or Square tiles. The reader must support the layout and bit depth." },
+    { lut_baker::output_format::rise_tex, "Monster Hunter Rise", "Rise TEX", ".tex.28", true, "Native Monster Hunter Rise LUT (TEX v28). Fixed 32x32x32, 8 bits per channel; values limited to 0-1." },
 };
 
 const output_format_option &find_format_option(const lut_baker::output_format format)
@@ -1878,8 +1886,16 @@ void draw_output_settings(runtime_state &state)
     ImGui::SetNextItemWidth(-FLT_MIN);
     if (ImGui::BeginCombo("##output_format", preview.c_str()))
     {
+        bool first_group = true;
+        bool previous_game_specific = false;
         for (const output_format_option &option : format_options)
         {
+            if (first_group || option.game_specific != previous_game_specific)
+            {
+                ImGui::SeparatorText(option.game_specific ? "Games" : "Common formats");
+                first_group = false;
+                previous_game_specific = option.game_specific;
+            }
             const bool selected = option.format == state.preferences.format;
             if (ImGui::Selectable(option.name, selected))
                 set_output_format(state, option.format);
@@ -1891,16 +1907,51 @@ void draw_output_settings(runtime_state &state)
         }
         ImGui::EndCombo();
     }
+    else
+        ImGui::SetItemTooltip("File format of the exported LUT. Hover a format in the list for its details.");
 
     const bool is_png = state.preferences.format == lut_baker::output_format::png;
     if (is_png)
     {
         field_label("Layout");
-        int layout = state.preferences.png_distribution == lut_baker::png_layout::square ? 1 : 0;
+        const bool square = state.preferences.png_distribution == lut_baker::png_layout::square;
         ImGui::SetNextItemWidth(-FLT_MIN);
-        if (ImGui::Combo("##png_layout", &layout, "Horizontal strip\0Square tiles\0"))
-            state.preferences.png_distribution = layout == 1 ? lut_baker::png_layout::square : lut_baker::png_layout::horizontal;
-        ImGui::SetItemTooltip("Horizontal strip: one row of slices, for example 4096x64 at size 64.\nSquare tiles: a square grid of slices, for example 512x512 at size 64. This is not Hald layout.");
+        if (ImGui::BeginCombo("##png_layout", lut_baker::png_layout_name(state.preferences.png_distribution)))
+        {
+            if (ImGui::Selectable("Horizontal strip", !square))
+                state.preferences.png_distribution = lut_baker::png_layout::horizontal;
+            if (!square)
+                ImGui::SetItemDefaultFocus();
+            ImGui::SetItemTooltip("One row of slices, for example 4096x64 at size 64.");
+            if (ImGui::Selectable("Square tiles", square))
+                state.preferences.png_distribution = lut_baker::png_layout::square;
+            if (square)
+                ImGui::SetItemDefaultFocus();
+            ImGui::SetItemTooltip("A square grid of slices, for example 512x512 at size 64. Only sizes 16 and 64. This is not Hald layout.");
+            ImGui::EndCombo();
+        }
+        else
+            ImGui::SetItemTooltip("How the LUT slices are arranged in the PNG image. The reader must expect the same layout.");
+
+        field_label("Bit depth");
+        const bool sixteen = state.preferences.png_depth == lut_baker::png_bit_depth::sixteen;
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::BeginCombo("##png_bit_depth", sixteen ? "16-bit" : "8-bit"))
+        {
+            if (ImGui::Selectable("8-bit", !sixteen))
+                state.preferences.png_depth = lut_baker::png_bit_depth::eight;
+            if (!sixteen)
+                ImGui::SetItemDefaultFocus();
+            ImGui::SetItemTooltip("Default, for ReShade compatibility. ReShade 6.8.0 loads PNG samples as 8 bits.");
+            if (ImGui::Selectable("16-bit", sixteen))
+                state.preferences.png_depth = lut_baker::png_bit_depth::sixteen;
+            if (sixteen)
+                ImGui::SetItemDefaultFocus();
+            ImGui::SetItemTooltip("More precision for applications that support 16-bit PNG. ReShade 6.8.0 still reduces it to 8 bits when loading.");
+            ImGui::EndCombo();
+        }
+        else
+            ImGui::SetItemTooltip("Bits per RGB channel. These are integer samples, not floating point.");
     }
     field_label("LUT size");
     if (state.preferences.format != lut_baker::output_format::rise_tex)
@@ -1935,7 +1986,7 @@ void draw_output_settings(runtime_state &state)
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             {
                 if (unavailable)
-                    ImGui::SetTooltip("This size needs padding for Square tiles. Choose 16 or 64, or switch to Horizontal strip.");
+                    ImGui::SetTooltip("Square tiles only supports sizes 16 and 64. Choose one of those, or switch to Horizontal strip.");
                 else if (is_png && size == 128)
                     ImGui::SetTooltip("%s\nThe horizontal strip is 16384 pixels wide. The reader must support that width.", tips[tip_index]);
                 else
@@ -1974,12 +2025,12 @@ void draw_output_settings(runtime_state &state)
         bool clamp = policy == lut_baker::range_policy::clamp;
         if (ImGui::Checkbox("Clamp to 0-1", &clamp))
             policy = clamp ? lut_baker::range_policy::clamp : lut_baker::range_policy::reject;
-        help_marker("This format stores values in 0-1 with 8 bits per channel. No gamma conversion is applied.\n"
+        help_marker("This format stores values in 0-1. No gamma conversion is applied.\n"
             "Off: an export with values outside 0-1 is rejected and nothing is written.\n"
             "On: those values are clamped, and the result reports the original range and how many were clipped.");
 
         skip_field_label();
-        disabled_wrapped(is_png ? "Use a PNG-compatible shader with matching layout and size. ReShadeLUTPreview.fx loads CUBE only." : "ReShadeLUTPreview.fx cannot load TEX. Verify the result in-game.");
+        disabled_wrapped(is_png ? "Use a PNG-compatible reader with matching layout, size and bit depth." : "Verify the result in-game.");
     }
 
     std::string settings_error;
@@ -1996,17 +2047,19 @@ void draw_output_settings(runtime_state &state)
         estimate_request.format = state.preferences.format;
         estimate_request.lattice_size = lut_baker::effective_lattice_size(state.preferences);
         estimate_request.png_distribution = state.preferences.png_distribution;
+        estimate_request.png_depth = state.preferences.png_depth;
         lut_baker::export_estimate estimate;
         if (lut_baker::estimate_export(estimate_request, estimate, settings_error))
         {
             skip_field_label();
             if (is_png)
-                ImGui::TextDisabled("%ux%u pixels, 8 bits per channel", estimate.image_width, estimate.image_height);
+                ImGui::TextDisabled("%ux%u pixels, %u bits per channel", estimate.image_width, estimate.image_height,
+                    static_cast<unsigned int>(state.preferences.png_depth));
             else
                 ImGui::TextDisabled("%llu RGB samples", static_cast<unsigned long long>(estimate.samples));
             skip_field_label();
             ImGui::TextDisabled("File budget: %.1f MiB", static_cast<double>(estimate.file_bytes) / (1024 * 1024));
-            ImGui::SetItemTooltip("A conservative file budget, not the exact file size. MiB means 1,048,576 bytes. Free space is checked before baking and again before writing, with a further 16 MiB reserve.");
+            ImGui::SetItemTooltip("A conservative file budget, not the exact file size. Free space is checked before baking and again before writing, plus a 16 MiB reserve.");
         }
     }
 
@@ -2050,7 +2103,7 @@ void draw_export_button(runtime_state &state)
 
     std::string label;
     if (!valid)
-        label = "Correct output settings";
+        label = "Fix output settings to continue";
     else if (state.selected.empty())
         label = "Export identity LUT  (GPU validation)  -  " + target;
     else
@@ -2135,7 +2188,8 @@ void draw_result(runtime_state &state)
             metric_row("File", "%s", state.last_output.filename().u8string().c_str());
             metric_row("Format", "%s %s", lut_baker::output_format_name(state.last_format), lattice_label(state.last_lattice_size).c_str());
             if (state.last_format == lut_baker::output_format::png)
-                metric_row("Layout", "%s, 8 bits per channel", lut_baker::png_layout_name(state.last_png_distribution));
+                metric_row("Layout", "%s, %u bits per channel", lut_baker::png_layout_name(state.last_png_distribution),
+                    static_cast<unsigned int>(state.last_png_depth));
             if (state.last_technique_count == 0)
                 metric_row("Techniques", "none (identity)");
             else
@@ -2171,7 +2225,9 @@ void draw_result(runtime_state &state)
                     const auto &metrics = state.quantized_metrics;
                     metric_row("Source RGB range", "[%.9g, %.9g]", metrics.source_minimum, metrics.source_maximum);
                     metric_row("Clipped values / samples", "%zu / %zu", metrics.clipped_components, metrics.clipped_samples);
-                    metric_row("8-bit quantization error (max / mean / RMS)","%.9g / %.9g / %.9g",
+                    const unsigned int bits = state.last_format == lut_baker::output_format::png ? static_cast<unsigned int>(state.last_png_depth) : 8u;
+                    const std::string label = std::to_string(bits) + "-bit quantization error (max / mean / RMS)";
+                    metric_row(label.c_str(),"%.9g / %.9g / %.9g",
                         metrics.quantization.maximum_absolute, metrics.quantization.mean_absolute, metrics.quantization.rms);
                 }
                 ImGui::EndTable();
@@ -2189,9 +2245,7 @@ void draw_result(runtime_state &state)
         ImGui::SameLine();
         if (ImGui::Button("Copy file name"))
             ImGui::SetClipboardText(state.last_output.filename().u8string().c_str());
-        ImGui::SetItemTooltip(state.last_format == lut_baker::output_format::cube
-            ? "Copy the file name to paste into ReShadeLUTPreview.fx."
-            : "Copy the file name to the clipboard.");
+        ImGui::SetItemTooltip("Copy the file name to the clipboard.");
     }
 }
 
@@ -2254,7 +2308,7 @@ void unregister_callbacks()
 
 extern "C" __declspec(dllexport) const char *NAME = "ReShade LUT Baker";
 extern "C" __declspec(dllexport) const char *AUTHOR = "ISpectre23";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Bakes the color grading of selected ReShade techniques into a 3D LUT (.cube), a compatible PNG image or a supported game's native LUT format.";
+extern "C" __declspec(dllexport) const char *DESCRIPTION = "Bakes the color grading of selected ReShade techniques into a 3D CUBE LUT, a compatible PNG image or a supported game's native LUT format.";
 
 BOOL APIENTRY DllMain(HMODULE module, const DWORD reason, LPVOID)
 {

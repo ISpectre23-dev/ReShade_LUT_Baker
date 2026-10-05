@@ -11,7 +11,7 @@ Offline validation performed on 2026-10-04 from the 1.0.2 base commit `585409514
 - C++ writers' identity/asymmetric TEX files match **every byte** of the independent Python binary32 reference; header SHA-256 matches the supplied profile. Both native files are exactly 131128 bytes.
 - CUBE identity, standard RGB order and binary32 round trips checked at 16³, 32³ and 64³. Existing selection/duplicate identity, FP16, metadata and out-of-range float tests pass.
 - Range rejection, explicit clipping, component/sample counts, fixed alpha, malformed buffers, invalid names, compound suffix collisions, immutable settings snapshots, concurrent destination creation, failed streams, exceptions and stale temporary ownership tested.
-- `ReShadeLUTPreview.fx` and `technique_catalog.hpp` are unchanged. No auxiliary grading shader or removed preview-alias code is present.
+- `technique_catalog.hpp` is unchanged. No auxiliary grading shaders are included.
 
 ## Measured offline errors
 

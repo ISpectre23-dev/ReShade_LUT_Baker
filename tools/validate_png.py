@@ -14,7 +14,7 @@ import zlib
 from validate_cube import Metrics, identity_samples, load_cube, measure, print_metrics
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-MAX_FILE_BYTES = 16 * 1024 * 1024
+MAX_FILE_BYTES = 32 * 1024 * 1024
 MAX_SAMPLES = 128**3
 
 
@@ -30,17 +30,21 @@ class PngLut:
     layout: str
     pixels: bytes
     software: str
+    bit_depth: int = 8
 
     def samples(self):
         """Yield samples in CUBE's red-fastest order, not image row order."""
         columns = self.size if self.layout == "horizontal" else math.isqrt(self.size)
+        component_bytes = self.bit_depth // 8
+        maximum = (1 << self.bit_depth) - 1
         for b in range(self.size):
             for g in range(self.size):
                 y = g + (b // columns) * self.size
                 for r in range(self.size):
                     x = r + (b % columns) * self.size
-                    index = (y * self.width + x) * 3
-                    yield tuple(self.pixels[index + c] / 255.0 for c in range(3))
+                    index = (y * self.width + x) * 3 * component_bytes
+                    rgb = self.pixels[index:index + 3] if self.bit_depth == 8 else struct.unpack_from(">3H", self.pixels, index)
+                    yield tuple(c / maximum for c in rgb)
 
 
 def _paeth(a: int, b: int, c: int) -> int:
@@ -49,12 +53,12 @@ def _paeth(a: int, b: int, c: int) -> int:
     return a if da <= db and da <= dc else b if db <= dc else c
 
 
-def decode_rgb_png(data: bytes) -> tuple[int, int, bytes, str]:
-    """Strict bounded decoder for non-interlaced 8-bit RGB/RGBA PNG data."""
+def decode_rgb_png(data: bytes) -> tuple[int, int, bytes, str, int]:
+    """Decode bounded non-interlaced 8/16-bit RGB/RGBA. Keep 16-bit RGB bytes big-endian."""
     if len(data) > MAX_FILE_BYTES or not data.startswith(PNG_SIGNATURE):
-        raise PngError("not a PNG file, or larger than the 16 MiB validation limit")
+        raise PngError("not a PNG file, or larger than the 32 MiB validation limit")
     offset = 8
-    width = height = channels = 0
+    width = height = channels = depth = 0
     compressed = bytearray()
     software = ""
     saw_header = saw_data = saw_end = data_finished = False
@@ -78,8 +82,8 @@ def decode_rgb_png(data: bytes) -> tuple[int, int, bytes, str]:
             width, height, depth, color, compression, filtering, interlace = struct.unpack(">IIBBBBB", payload)
             if width == 0 or height == 0 or width > 16384 or height > 16384 or width * height > MAX_SAMPLES:
                 raise PngError("PNG dimensions exceed the baker's sample budget")
-            if depth != 8 or color not in (2, 6) or compression != 0 or filtering != 0 or interlace != 0:
-                raise PngError("validation requires non-interlaced 8-bit RGB or RGBA PNG")
+            if depth not in (8, 16) or color not in (2, 6) or compression != 0 or filtering != 0 or interlace != 0:
+                raise PngError("validation requires non-interlaced 8-bit or 16-bit RGB or RGBA PNG")
             channels = 3 if color == 2 else 4
             saw_header = True
         elif chunk_type == b"IDAT":
@@ -94,7 +98,7 @@ def decode_rgb_png(data: bytes) -> tuple[int, int, bytes, str]:
         else:
             if saw_data:
                 data_finished = True
-            if chunk_type in (b"gAMA", b"sRGB", b"iCCP", b"cHRM"):
+            if chunk_type in (b"gAMA", b"sRGB", b"iCCP", b"cHRM", b"cICP", b"mDCV", b"cLLI"):
                 raise PngError("PNG contains color-space metadata; this validator expects the baker's untagged RGB data")
             if chunk_type == b"tEXt" and payload.startswith(b"Software\0"):
                 software = payload[len(b"Software\0"):].decode("latin-1")
@@ -103,7 +107,10 @@ def decode_rgb_png(data: bytes) -> tuple[int, int, bytes, str]:
         offset = end
     if not (saw_header and saw_data and saw_end):
         raise PngError("PNG is missing its header, image data or end chunk")
-    stride = width * channels
+    component_bytes = depth // 8
+    pixel_bytes = channels * component_bytes
+    rgb_bytes = 3 * component_bytes
+    stride = width * pixel_bytes
     expected = height * (stride + 1)
     decoder = zlib.decompressobj()
     try:
@@ -112,7 +119,7 @@ def decode_rgb_png(data: bytes) -> tuple[int, int, bytes, str]:
         raise PngError("invalid PNG compressed image data") from exc
     if len(raw) != expected or not decoder.eof or decoder.unconsumed_tail or decoder.unused_data:
         raise PngError("PNG decoded length does not match its dimensions")
-    pixels = bytearray(width * height * 3)
+    pixels = bytearray(width * height * rgb_bytes)
     previous = bytearray(stride)
     for y in range(height):
         start = y * (stride + 1)
@@ -121,28 +128,29 @@ def decode_rgb_png(data: bytes) -> tuple[int, int, bytes, str]:
             raise PngError("unknown PNG row filter")
         row = bytearray(raw[start + 1:start + 1 + stride])
         for x in range(stride):
-            left = row[x - channels] if x >= channels else 0
+            left = row[x - pixel_bytes] if x >= pixel_bytes else 0
             above = previous[x]
-            upper_left = previous[x - channels] if x >= channels else 0
+            upper_left = previous[x - pixel_bytes] if x >= pixel_bytes else 0
             predictor = (0, left, above, (left + above) // 2, _paeth(left, above, upper_left))[filter_type]
             row[x] = (row[x] + predictor) & 255
         if channels == 3:
-            pixels[y * width * 3:(y + 1) * width * 3] = row
+            pixels[y * width * rgb_bytes:(y + 1) * width * rgb_bytes] = row
         else:
             for x in range(width):
-                if row[x * 4 + 3] != 255:
+                source = x * pixel_bytes
+                if any(value != 255 for value in row[source + rgb_bytes:source + pixel_bytes]):
                     raise PngError("PNG contains non-opaque alpha")
-                index = (y * width + x) * 3
-                pixels[index:index + 3] = row[x * 4:x * 4 + 3]
+                index = (y * width + x) * rgb_bytes
+                pixels[index:index + rgb_bytes] = row[source:source + rgb_bytes]
         previous = row
-    return width, height, bytes(pixels), software
+    return width, height, bytes(pixels), software, depth
 
 
 def load_png(path: pathlib.Path, layout: str) -> PngLut:
     try:
         if path.stat().st_size > MAX_FILE_BYTES:
-            raise PngError("PNG exceeds the 16 MiB validation limit")
-        width, height, pixels, software = decode_rgb_png(path.read_bytes())
+            raise PngError("PNG exceeds the 32 MiB validation limit")
+        width, height, pixels, software, depth = decode_rgb_png(path.read_bytes())
     except OSError as exc:
         raise PngError(f"cannot read PNG: {exc}") from exc
     if layout == "horizontal":
@@ -155,7 +163,7 @@ def load_png(path: pathlib.Path, layout: str) -> PngLut:
             raise PngError("Square tiles need an exact square grid without padding")
     else:
         raise PngError("choose an explicit layout: horizontal or square")
-    return PngLut(size, width, height, layout, pixels, software)
+    return PngLut(size, width, height, layout, pixels, software, depth)
 
 
 def compare_cube(png: PngLut, cube_path: pathlib.Path, clamp: bool = False) -> Metrics:
@@ -179,20 +187,21 @@ def main(argv=None) -> int:
             command.add_argument("cube", type=pathlib.Path)
             command.add_argument("--clamp", action="store_true")
         if name != "inspect":
-            command.add_argument("--tolerance", type=float, default=0.5 / 255.0 + 3e-8)
+            command.add_argument("--tolerance", type=float, help="maximum RGB error; defaults to half a step at the PNG bit depth plus float32 identity error")
     args = parser.parse_args(argv)
     try:
         png = load_png(args.png, args.layout)
-        print(f"PNG: {png.width}x{png.height}, {png.size}^3, {png.layout}, 8 bits per channel")
+        print(f"PNG: {png.width}x{png.height}, {png.size}^3, {png.layout}, {png.bit_depth} bits per channel")
         print(f"Exporter: {png.software or '(not recorded)'}")
         if args.command == "inspect":
             return 0
-        if not math.isfinite(args.tolerance) or args.tolerance < 0:
+        tolerance = args.tolerance if args.tolerance is not None else 0.5 / ((1 << png.bit_depth) - 1) + 3e-8
+        if not math.isfinite(tolerance) or tolerance < 0:
             raise PngError("tolerance must be finite and non-negative")
         metrics = measure(png.samples(), identity_samples(png.size)) if args.command == "identity" else compare_cube(png, args.cube, args.clamp)
         print_metrics(metrics)
-        if metrics.maximum_absolute > args.tolerance:
-            print(f"FAIL: maximum error exceeds {args.tolerance:g}", file=sys.stderr)
+        if metrics.maximum_absolute > tolerance:
+            print(f"FAIL: maximum error exceeds {tolerance:g}", file=sys.stderr)
             return 1
         print("PASS: maximum error is within tolerance")
         return 0

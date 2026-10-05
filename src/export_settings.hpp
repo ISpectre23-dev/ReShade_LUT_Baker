@@ -10,6 +10,12 @@ namespace lut_baker
 enum class output_format { cube, rise_tex, png };
 enum class range_policy { reject, clamp };
 enum class png_layout { horizontal, square };
+enum class png_bit_depth { eight = 8, sixteen = 16 };
+
+[[nodiscard]] constexpr bool valid_png_bit_depth(const png_bit_depth depth) noexcept
+{
+    return depth == png_bit_depth::eight || depth == png_bit_depth::sixteen;
+}
 
 inline constexpr std::uint32_t minimum_lut_size = 2;
 inline constexpr std::uint32_t maximum_lut_size = 128;
@@ -29,6 +35,7 @@ struct export_preferences
     std::uint32_t png_size = 64;
     png_layout png_distribution = png_layout::horizontal;
     range_policy png_range = range_policy::reject;
+    png_bit_depth png_depth = png_bit_depth::eight;
 };
 
 // Captured once at queue time. GPU allocation, readback and the CPU worker
@@ -39,6 +46,7 @@ struct export_request
     std::uint32_t lattice_size = 64;
     range_policy range = range_policy::reject;
     png_layout png_distribution = png_layout::horizontal;
+    png_bit_depth png_depth = png_bit_depth::eight;
     std::filesystem::path directory;
     std::string filename;
 };

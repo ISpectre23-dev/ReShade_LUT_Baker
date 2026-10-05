@@ -36,7 +36,7 @@ bool validate_runtime_settings(const runtime_settings &settings, std::string &er
     error.clear();
     if (settings.preset.empty() || settings.techniques.empty())
     {
-        error = "The current preset or technique catalog is unavailable.";
+        error = "The current preset or technique list is unavailable.";
         return false;
     }
     std::unordered_map<std::string, std::size_t> uniforms;
@@ -85,7 +85,7 @@ bool plan_settings_restore(const runtime_settings &saved, const runtime_settings
     }
     if (saved.uniforms.size() != current.uniforms.size() || saved.techniques.size() != current.techniques.size())
     {
-        error = "The effect catalog changed while settings recovery was pending. Old settings cannot be matched safely.";
+        error = "The effect list changed while settings recovery was pending. Old settings cannot be matched safely.";
         return false;
     }
     std::unordered_map<std::string, std::size_t> uniforms;

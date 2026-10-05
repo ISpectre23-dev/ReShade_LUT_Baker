@@ -78,12 +78,16 @@ int main(const int argc, char **argv)
                 if (distribution == lut_baker::png_layout::square && size != 16 && size != 64)
                     continue;
                 const std::string suffix = distribution == lut_baker::png_layout::square ? "_square.png" : "_horizontal.png";
-                lut_baker::quantization_metrics png_metrics;
-                if (!lut_baker::write_png_lut_atomic(directory / ("Identity" + std::to_string(size) + suffix), size,
-                    identity, distribution, lut_baker::range_policy::reject, metadata, png_metrics, error))
+                for (const auto depth : { lut_baker::png_bit_depth::eight, lut_baker::png_bit_depth::sixteen })
                 {
-                    std::cerr << error << '\n';
-                    return 1;
+                    const std::string depth_suffix = depth == lut_baker::png_bit_depth::sixteen ? "_16bit" : "";
+                    lut_baker::quantization_metrics png_metrics;
+                    if (!lut_baker::write_png_lut_atomic(directory / ("Identity" + std::to_string(size) + depth_suffix + suffix), size,
+                        identity, distribution, lut_baker::range_policy::reject, metadata, png_metrics, error, depth))
+                    {
+                        std::cerr << error << '\n';
+                        return 1;
+                    }
                 }
             }
         }
@@ -104,12 +108,16 @@ int main(const int argc, char **argv)
         for (const auto distribution : { lut_baker::png_layout::horizontal, lut_baker::png_layout::square })
         {
             const std::string suffix = distribution == lut_baker::png_layout::square ? "_square.png" : "_horizontal.png";
-            lut_baker::quantization_metrics png_metrics;
-            if (!lut_baker::write_png_lut_atomic(directory / ("Asymmetric64" + suffix), 64, asymmetric64,
-                distribution, lut_baker::range_policy::reject, metadata, png_metrics, error))
+            for (const auto depth : { lut_baker::png_bit_depth::eight, lut_baker::png_bit_depth::sixteen })
             {
-                std::cerr << error << '\n';
-                return 1;
+                const std::string depth_suffix = depth == lut_baker::png_bit_depth::sixteen ? "_16bit" : "";
+                lut_baker::quantization_metrics png_metrics;
+                if (!lut_baker::write_png_lut_atomic(directory / ("Asymmetric64" + depth_suffix + suffix), 64, asymmetric64,
+                    distribution, lut_baker::range_policy::reject, metadata, png_metrics, error, depth))
+                {
+                    std::cerr << error << '\n';
+                    return 1;
+                }
             }
         }
         std::cout << "Fixtures written to " << directory.u8string() << ". In-game loading remains untested.\n";

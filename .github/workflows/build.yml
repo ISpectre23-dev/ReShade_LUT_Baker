@@ -35,7 +35,6 @@ jobs:
           name: ReShadeLUTBaker-x64
           path: |
             build/Release/ReShadeLUTBaker.addon64
-            shaders/ReShadeLUTPreview.fx
             README.md
             LICENSE
           if-no-files-found: error

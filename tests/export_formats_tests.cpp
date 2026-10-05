@@ -18,6 +18,7 @@ int main()
 {
     using namespace lut_baker;
     export_preferences preferences;
+    expect(preferences.png_depth == png_bit_depth::eight, "PNG defaults to 8 bits per channel");
     std::string error, filename;
     export_request request;
     const auto directory = std::filesystem::temp_directory_path();
@@ -55,6 +56,15 @@ int main()
     preferences.png_range = range_policy::clamp;
     expect(snapshot_export_request(preferences, "png", directory, request, error) && request.filename == "png.png" && request.range == range_policy::clamp && request.lattice_size == 32, "PNG settings are independent from CUBE");
     const auto png_snapshot = request;
+    preferences.png_depth = png_bit_depth::sixteen;
+    expect(snapshot_export_request(preferences, "png16", directory, request, error) && request.png_depth == png_bit_depth::sixteen,
+        "16-bit PNG preference captured in the export snapshot");
+    const auto png16_snapshot = request;
+    preferences.png_depth = static_cast<png_bit_depth>(12);
+    expect(!snapshot_export_request(preferences, "invalid", directory, request, error) && request.filename == png16_snapshot.filename &&
+        request.png_depth == png_bit_depth::sixteen, "invalid PNG bit depth rejected without mutating the active request");
+    preferences.png_depth = png_bit_depth::eight;
+    expect(snapshot_export_request(preferences, "png", directory, request, error), "switch back to default PNG depth");
     preferences.png_distribution = png_layout::square;
     expect(!snapshot_export_request(preferences, "square", directory, request, error) && request.filename == png_snapshot.filename && request.png_distribution == png_layout::horizontal, "unsupported square size rejected without modifying snapshot");
     preferences.png_size = 64;
@@ -64,6 +74,11 @@ int main()
     expect(snapshot_export_request(preferences, "rise", directory, request, error) && request.lattice_size == 32 && request.range == range_policy::reject, "Rise size and policy unchanged");
     preferences.format = output_format::cube;
     expect(snapshot_export_request(preferences, "back", directory, request, error) && request.lattice_size == 65 && request.range == range_policy::reject, "custom CUBE choice preserved across format switches");
+    preferences.format = output_format::png;
+    expect(snapshot_export_request(preferences, "backpng", directory, request, error) && request.png_depth == png_bit_depth::eight,
+        "PNG bit-depth preference survives format switches");
+    expect(png_snapshot.png_depth == png_bit_depth::eight && png16_snapshot.png_depth == png_bit_depth::sixteen,
+        "changing depth cannot change previously captured exports");
     expect(custom_snapshot.lattice_size == 65 && custom_snapshot.filename == "saved.cube" && png_snapshot.range == range_policy::clamp && png_snapshot.png_distribution == png_layout::horizontal, "active snapshots immutable across preference changes");
     expect(validate_output_filename("lut", filename, error, output_format::png) && filename == "lut.png", "PNG extension added");
     expect(!validate_output_filename("lut.PNG", filename, error, output_format::png) && !validate_output_filename("lut.cube.png", filename, error, output_format::png), "wrong and doubled extensions rejected");
@@ -80,6 +95,14 @@ int main()
     request.format = output_format::png;
     request.png_distribution = png_layout::horizontal;
     expect(estimate_export(request, estimate, error) && estimate.image_width == 16384 && estimate.image_height == 128, "PNG 128 strip dimensions");
+    const auto png8_budget = estimate.file_bytes;
+    request.png_depth = png_bit_depth::sixteen;
+    expect(estimate_export(request, estimate, error) && estimate.file_bytes == png8_budget + estimate.samples * 4 &&
+        estimate.float_buffer_bytes == 33554432, "16-bit PNG budget includes larger CPU/file samples without changing the float GPU buffer");
+    expect(!check_export_capacity(png8_budget + 16 * 1024 * 1024, estimate, error), "8-bit disk budget cannot authorize a 16-bit export");
+    request.png_depth = static_cast<png_bit_depth>(99);
+    expect(!estimate_export(request, estimate, error), "invalid bit depth cannot pass the direct capacity check");
+    request.png_depth = png_bit_depth::sixteen;
     request.png_distribution = png_layout::square;
     expect(!estimate_export(request, estimate, error), "square 128 cannot silently add padding");
     std::cout << (failures == 0 ? "Export format tests passed\n" : "Export format tests failed\n");

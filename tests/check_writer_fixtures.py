@@ -3,6 +3,7 @@
 import pathlib
 import math
 import subprocess
+import struct
 import sys
 import tempfile
 
@@ -77,23 +78,32 @@ def main():
             for layout in ("horizontal", "square"):
                 if layout == "square" and size not in (16, 64):
                     continue
-                png = load_png(directory / f"Identity{size}_{layout}.png", layout)
-                assert png.size == size and png.software.startswith("ReShade LUT Baker ")
-                for actual, ideal in zip(png.samples(), identity_samples(size)):
-                    expected = tuple(math.floor(float32(v) * 255.0 + 0.5) / 255.0 for v in ideal)
-                    assert actual == expected, "PNG bytes differ from independent identity reference"
-                quant = measure(png.samples(), identity_samples(size))
-                print(f"Identity{size} PNG {layout}: all pixels verified; max/mean/RMS "
-                      f"{quant.maximum_absolute:.12g} / {quant.mean_absolute:.12g} / {quant.rms:.12g}")
-                assert quant.maximum_absolute <= 0.5 / 255.0 + 3e-8
+                for depth in (8, 16):
+                    depth_suffix = "_16bit" if depth == 16 else ""
+                    png = load_png(directory / f"Identity{size}{depth_suffix}_{layout}.png", layout)
+                    assert png.size == size and png.bit_depth == depth and png.software.startswith("ReShade LUT Baker ")
+                    maximum = (1 << depth) - 1
+                    for actual, ideal in zip(png.samples(), identity_samples(size)):
+                        expected = tuple(math.floor(float32(v) * maximum + 0.5) / maximum for v in ideal)
+                        assert actual == expected, "PNG samples differ from independent identity reference"
+                    quant = measure(png.samples(), identity_samples(size))
+                    print(f"Identity{size} PNG {layout} {depth}-bit: all pixels verified; max/mean/RMS "
+                          f"{quant.maximum_absolute:.12g} / {quant.mean_absolute:.12g} / {quant.rms:.12g}")
+                    assert quant.maximum_absolute <= 0.5 / maximum + 3e-8
         grade64 = load_cube(directory / "Asymmetric64.cube")
         for layout in ("horizontal", "square"):
-            png = load_png(directory / f"Asymmetric64_{layout}.png", layout)
-            for actual, sample in zip(png.samples(), grade64.samples):
-                expected = tuple(math.floor(float32(v) * 255.0 + 0.5) / 255.0 for v in sample)
-                assert actual == expected, "PNG axis/channel/codec reference failed"
-            quant = measure(png.samples(), grade64.samples)
-            assert quant.maximum_absolute <= 0.5 / 255.0 + 1e-8
+            for depth in (8, 16):
+                depth_suffix = "_16bit" if depth == 16 else ""
+                png = load_png(directory / f"Asymmetric64{depth_suffix}_{layout}.png", layout)
+                maximum = (1 << depth) - 1
+                assert png.bit_depth == depth
+                for actual, sample in zip(png.samples(), grade64.samples):
+                    expected = tuple(math.floor(float32(v) * maximum + 0.5) / maximum for v in sample)
+                    assert actual == expected, "PNG axis/channel/codec reference failed"
+                quant = measure(png.samples(), grade64.samples)
+                assert quant.maximum_absolute <= 0.5 / maximum + 1e-8
+                if depth == 16:
+                    assert any(value % 257 for value in struct.unpack_from(">3H", png.pixels, 0)), "16-bit output must retain non-repeated low bytes"
         before = identity_path.read_bytes()
         retry = subprocess.run([sys.argv[1], str(directory)], capture_output=True, text=True)
         assert retry.returncode != 0 and identity_path.read_bytes() == before, "fixture tool must not overwrite exports"

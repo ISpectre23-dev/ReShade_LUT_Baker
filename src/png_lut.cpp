@@ -96,7 +96,8 @@ const char *png_layout_name(const png_layout layout) noexcept
 }
 
 bool prepare_png_lut(const std::uint32_t size, const std::vector<float4> &samples, const png_layout layout,
-    const range_policy policy, png_rgb_image &image, quantization_metrics &metrics, std::string &error)
+    const range_policy policy, png_rgb_image &image, quantization_metrics &metrics, std::string &error,
+    const png_bit_depth depth)
 {
     image = {};
     metrics = {};
@@ -105,6 +106,7 @@ bool prepare_png_lut(const std::uint32_t size, const std::vector<float4> &sample
     request.format = output_format::png;
     request.lattice_size = size;
     request.png_distribution = layout;
+    request.png_depth = depth;
     export_estimate estimate;
     if (!estimate_export(request, estimate, error) || samples.size() != estimate.samples)
     {
@@ -154,7 +156,10 @@ bool prepare_png_lut(const std::uint32_t size, const std::vector<float4> &sample
 
     image.width = estimate.image_width;
     image.height = estimate.image_height;
-    image.pixels.resize(samples.size() * 3);
+    image.depth = depth;
+    const std::size_t component_bytes = depth == png_bit_depth::sixteen ? 2u : 1u;
+    const double maximum = depth == png_bit_depth::sixteen ? 65535.0 : 255.0;
+    image.pixels.resize(samples.size() * 3 * component_bytes);
     const std::uint32_t columns = layout == png_layout::square ? image.width / size : size;
     double absolute_sum = 0.0;
     double squared_sum = 0.0;
@@ -165,14 +170,16 @@ bool prepare_png_lut(const std::uint32_t size, const std::vector<float4> &sample
                 const auto &sample = samples[(static_cast<std::size_t>(b) * size + g) * size + r];
                 const std::uint32_t x = r + (b % columns) * size;
                 const std::uint32_t y = g + (b / columns) * size;
-                const auto pixel = (static_cast<std::size_t>(y) * image.width + x) * 3;
+                const auto pixel = (static_cast<std::size_t>(y) * image.width + x) * 3 * component_bytes;
                 const float rgb[] = { sample.r, sample.g, sample.b };
                 for (std::size_t c = 0; c < 3; ++c)
                 {
                     const double value = std::clamp(static_cast<double>(rgb[c]), 0.0, 1.0);
-                    const auto quantized = static_cast<std::uint8_t>(std::floor(value * 255.0 + 0.5));
-                    image.pixels[pixel + c] = quantized;
-                    const double difference = std::abs(static_cast<double>(quantized) / 255.0 - value);
+                    const auto quantized = static_cast<std::uint16_t>(std::floor(value * maximum + 0.5));
+                    image.pixels[pixel + c * component_bytes] = static_cast<std::uint8_t>(quantized & 0xffu);
+                    if (component_bytes == 2)
+                        image.pixels[pixel + c * component_bytes + 1] = static_cast<std::uint8_t>(quantized >> 8);
+                    const double difference = std::abs(static_cast<double>(quantized) / maximum - value);
                     metrics.quantization.maximum_absolute = std::max(metrics.quantization.maximum_absolute, difference);
                     absolute_sum += difference;
                     squared_sum += difference * difference;
@@ -189,8 +196,9 @@ bool encode_png(const png_rgb_image &image, const std::string &software, std::ve
     bytes.clear();
     error.clear();
     const auto pixels = static_cast<std::uint64_t>(image.width) * image.height;
+    const std::uint32_t component_bytes = image.depth == png_bit_depth::sixteen ? 2u : 1u;
     if (image.width == 0 || image.height == 0 || pixels > static_cast<std::uint64_t>(maximum_lut_size) * maximum_lut_size * maximum_lut_size ||
-        image.pixels.size() != pixels * 3 || software.size() > 4096)
+        !valid_png_bit_depth(image.depth) || image.pixels.size() != pixels * 3 * component_bytes || software.size() > 4096)
     {
         error = "Invalid or oversized PNG image. No PNG was written. Choose a supported size and layout.";
         return false;
@@ -221,11 +229,13 @@ bool encode_png(const png_rgb_image &image, const std::string &software, std::ve
         encoding_failure(frame->Initialize(options.Get()), "initializing the PNG frame", error) ||
         encoding_failure(frame->SetSize(image.width, image.height), "setting image dimensions", error))
         return false;
-    // The native Windows PNG codec accepts 24-bit BGR, not 24-bit RGB input.
-    // Swap only the channel order for the codec; PNG stores the original RGB bytes.
-    WICPixelFormatGUID pixel_format = GUID_WICPixelFormat24bppBGR;
-    if (encoding_failure(frame->SetPixelFormat(&pixel_format), "setting 8-bit RGB output", error) ||
-        encoding_failure(IsEqualGUID(pixel_format, GUID_WICPixelFormat24bppBGR) ? S_OK : E_FAIL, "verifying the RGB format", error))
+    // Request the exact integer precision. Never accept a downgraded format.
+    // 8-bit input is BGR; 16-bit input is native little-endian RGB. The codec
+    // writes PNG's big-endian 16-bit samples without a pixel converter.
+    const WICPixelFormatGUID requested_format = component_bytes == 2 ? GUID_WICPixelFormat48bppRGB : GUID_WICPixelFormat24bppBGR;
+    WICPixelFormatGUID pixel_format = requested_format;
+    if (encoding_failure(frame->SetPixelFormat(&pixel_format), "setting RGB bit depth", error) ||
+        encoding_failure(IsEqualGUID(pixel_format, requested_format) ? S_OK : E_FAIL, "verifying the RGB bit depth", error))
         return false;
     // No pixel converter or SetColorContexts. Remove default color tags after commit.
     if (!software.empty())
@@ -238,17 +248,19 @@ bool encode_png(const png_rgb_image &image, const std::string &software, std::ve
             encoding_failure(metadata->SetMetadataByName(L"/tEXt/{str=Software}", &text), "writing exporter metadata", error))
             return false;
     }
-    std::vector<std::uint8_t> row(static_cast<std::size_t>(image.width) * 3);
+    std::vector<std::uint8_t> row(static_cast<std::size_t>(image.width) * 3 * component_bytes);
     for (std::uint32_t y = 0; y < image.height; ++y)
     {
-        for (std::size_t x = 0; x < row.size(); x += 3)
+        if (component_bytes == 2)
+            std::memcpy(row.data(), image.pixels.data() + static_cast<std::size_t>(y) * row.size(), row.size());
+        else for (std::size_t x = 0; x < row.size(); x += 3)
         {
             const auto source = static_cast<std::size_t>(y) * row.size() + x;
             row[x] = image.pixels[source + 2];
             row[x + 1] = image.pixels[source + 1];
             row[x + 2] = image.pixels[source];
         }
-        if (encoding_failure(frame->WritePixels(1, image.width * 3, static_cast<UINT>(row.size()), row.data()), "encoding RGB samples", error))
+        if (encoding_failure(frame->WritePixels(1, static_cast<UINT>(row.size()), static_cast<UINT>(row.size()), row.data()), "encoding RGB samples", error))
             return false;
     }
     if (encoding_failure(frame->Commit(), "committing the PNG frame", error) ||
@@ -257,7 +269,7 @@ bool encode_png(const png_rgb_image &image, const std::string &software, std::ve
     STATSTG stat {};
     if (encoding_failure(stream->Stat(&stat, STATFLAG_NONAME), "reading the encoded size", error))
         return false;
-    if (stat.cbSize.QuadPart == 0 || stat.cbSize.QuadPart > pixels * 4 + 1024 * 1024)
+    if (stat.cbSize.QuadPart == 0 || stat.cbSize.QuadPart > pixels * 4 * component_bytes + 1024 * 1024)
     {
         error = "The encoded PNG exceeded its file budget. No PNG was written. Try a smaller size or CUBE.";
         return false;
@@ -274,16 +286,26 @@ bool encode_png(const png_rgb_image &image, const std::string &software, std::ve
             error = "The PNG encoder returned incomplete data. No PNG was written. Try CUBE or restart the game.";
         return false;
     }
-    return remove_color_metadata(bytes, error);
+    if (!remove_color_metadata(bytes, error))
+        return false;
+    // Verify the encoded IHDR, not just the format accepted by SetPixelFormat.
+    if (bytes.size() < 33 || bytes[24] != static_cast<std::uint8_t>(image.depth) || bytes[25] != 2)
+    {
+        bytes.clear();
+        error = "The PNG encoder did not preserve the requested RGB bit depth. No PNG was written. Try CUBE or check the Windows imaging components.";
+        return false;
+    }
+    return true;
 }
 
 bool write_png_lut_atomic(const std::filesystem::path &destination, const std::uint32_t size,
     const std::vector<float4> &samples, const png_layout layout, const range_policy policy,
-    const cube_metadata &metadata, quantization_metrics &metrics, std::string &error)
+    const cube_metadata &metadata, quantization_metrics &metrics, std::string &error,
+    const png_bit_depth depth)
 {
     png_rgb_image image;
     std::vector<std::uint8_t> bytes;
-    if (!prepare_png_lut(size, samples, layout, policy, image, metrics, error) ||
+    if (!prepare_png_lut(size, samples, layout, policy, image, metrics, error, depth) ||
         !encode_png(image, "ReShade LUT Baker " + metadata.exporter_version, bytes, error))
         return false;
     return write_file_atomic(destination, false, [&bytes](std::ostream &output, std::string &) {

@@ -102,7 +102,7 @@ bool validate_output_filename(const std::string_view value, std::string &normali
     {
         if (suffix != other_suffix && ends_with(basename, other_suffix))
         {
-            error = "The name contains another export format's extension. Use a basename or the matching extension.";
+            error = "The name contains another export format's extension. Use a name without extension or the matching one.";
             return false;
         }
     }
@@ -183,6 +183,7 @@ bool snapshot_export_request(const export_preferences &preferences, const std::s
     snapshot.range = preferences.format == output_format::rise_tex ? preferences.rise_range :
         preferences.format == output_format::png ? preferences.png_range : range_policy::reject;
     snapshot.png_distribution = preferences.png_distribution;
+    snapshot.png_depth = preferences.png_depth;
     snapshot.directory = directory;
     if (!validate_output_filename(filename, snapshot.filename, error, snapshot.format))
         return false;
@@ -207,6 +208,11 @@ bool validate_export_preferences(const export_preferences &preferences, std::str
     }
     else if (preferences.format == output_format::png)
     {
+        if (!valid_png_bit_depth(preferences.png_depth))
+        {
+            error = "Invalid PNG bit depth. Choose 8 or 16 bits per channel before baking.";
+            return false;
+        }
         if (!preset_size(preferences.png_size) ||
             (preferences.png_distribution != png_layout::horizontal && preferences.png_distribution != png_layout::square))
         {
@@ -215,7 +221,7 @@ bool validate_export_preferences(const export_preferences &preferences, std::str
         }
         if (preferences.png_distribution == png_layout::square && preferences.png_size != 16 && preferences.png_size != 64)
         {
-            error = "Square tiles require size 16 or 64 without padding. Choose one of those sizes or Horizontal strip.";
+            error = "Square tiles only supports sizes 16 and 64. Choose one of those, or switch to Horizontal strip.";
             return false;
         }
     }
@@ -251,6 +257,8 @@ bool estimate_export(const export_request &request, export_estimate &estimate, s
         estimate.file_bytes = 56 + estimate.samples * 4;
         return true;
     case output_format::png:
+        if (!valid_png_bit_depth(request.png_depth))
+            break;
         if (request.png_distribution == png_layout::horizontal)
         {
             estimate.image_width = request.lattice_size * request.lattice_size;
@@ -264,11 +272,11 @@ bool estimate_export(const export_request &request, export_estimate &estimate, s
         else
             break;
         // RGB scanlines and worst-case deflate/chunk overhead fit comfortably here.
-        estimate.file_bytes = estimate.samples * 4 + 1024 * 1024;
+        estimate.file_bytes = estimate.samples * (request.png_depth == png_bit_depth::sixteen ? 8 : 4) + 1024 * 1024;
         return true;
     }
     estimate = {};
-    error = "Invalid export size or layout. Correct the output settings before baking.";
+    error = "Invalid export size, layout or bit depth. Correct the output settings before baking.";
     return false;
 }
 

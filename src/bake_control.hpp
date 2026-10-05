@@ -23,7 +23,9 @@ public:
         started_ = now;
         active_ = true;
         waiting_ = false;
+        initializing_ = false;
         waiting_key_ = {};
+        attempted_initialization_.clear();
         attempted_missing_.clear();
     }
 
@@ -51,18 +53,36 @@ public:
         waiting_key_ = key;
         waiting_generation_ = reload_generation;
         waiting_ = true;
+        initializing_ = false;
+        return true;
+    }
+
+    // Default resources and the offscreen permutation are separate stages.
+    // Each exact technique may wait once in each, under the same deadline.
+    [[nodiscard]] bool wait_for_initialization(const technique_key &key, const std::uint64_t reload_generation)
+    {
+        if (!active_ || selection_contains_exact(attempted_initialization_, key))
+            return false;
+        attempted_initialization_.insert(key);
+        waiting_key_ = key;
+        waiting_generation_ = reload_generation;
+        waiting_ = true;
+        initializing_ = true;
         return true;
     }
 
     [[nodiscard]] bool waiting() const noexcept { return waiting_; }
+    [[nodiscard]] bool initializing() const noexcept { return waiting_ && initializing_; }
     [[nodiscard]] const technique_key &waiting_key() const noexcept { return waiting_key_; }
 
 private:
     clock::time_point started_ {};
     bool active_ = false;
     bool waiting_ = false;
+    bool initializing_ = false;
     std::uint64_t waiting_generation_ = 0;
     technique_key waiting_key_;
+    technique_selection attempted_initialization_;
     technique_selection attempted_missing_;
 };
 

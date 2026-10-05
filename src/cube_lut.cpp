@@ -41,7 +41,7 @@ namespace lut_baker
 {
 std::pair<std::uint32_t, std::uint32_t> choose_lattice_layout(const std::uint32_t size)
 {
-    if (size < 2)
+    if (!valid_lut_size(size))
         return { 0, 0 };
 
     const std::uint64_t sample_count = static_cast<std::uint64_t>(size) * size * size;
@@ -65,7 +65,7 @@ std::vector<float4> make_identity_lattice(
     const std::uint32_t height)
 {
     const std::uint64_t sample_count = static_cast<std::uint64_t>(size) * size * size;
-    if (size < 2 || static_cast<std::uint64_t>(width) * height < sample_count)
+    if (!valid_lut_size(size) || static_cast<std::uint64_t>(width) * height < sample_count)
         return {};
 
     std::vector<float4> pixels(static_cast<std::size_t>(width) * height);
@@ -95,7 +95,7 @@ error_metrics measure_identity_error(const std::vector<float4> &samples, const s
 {
     error_metrics result;
     const std::uint64_t sample_count = static_cast<std::uint64_t>(size) * size * size;
-    if (size < 2 || samples.size() < sample_count)
+    if (!valid_lut_size(size) || samples.size() < sample_count)
     {
         result.maximum_absolute = std::numeric_limits<double>::infinity();
         result.mean_absolute = std::numeric_limits<double>::infinity();
@@ -228,7 +228,7 @@ bool write_cube_atomic(
     std::string &error)
 {
     const std::uint64_t expected_count = static_cast<std::uint64_t>(size) * size * size;
-    if (size < 2 || samples.size() != expected_count)
+    if (!valid_lut_size(size) || samples.size() != expected_count)
     {
         error = "The sample buffer does not contain exactly one complete 3D lattice.";
         return false;

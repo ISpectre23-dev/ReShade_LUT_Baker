@@ -21,16 +21,7 @@ inline constexpr std::array<std::uint8_t, 56> rise_tex_header {{
     0x80, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00
 }};
 
-struct rise_export_metrics
-{
-    double source_minimum = 0.0;
-    double source_maximum = 0.0;
-    std::size_t clipped_components = 0;
-    std::size_t clipped_samples = 0;
-    // Against the range-policy-adjusted float input, not the ideal lattice or
-    // unclipped input. GPU identity and clipping error are separate concerns.
-    error_metrics quantization;
-};
+using rise_export_metrics = quantization_metrics;
 
 [[nodiscard]] bool serialize_rise_tex(std::uint32_t size, const std::vector<float4> &samples, range_policy policy,
     std::vector<std::uint8_t> &bytes, rise_export_metrics &metrics, std::string &error);

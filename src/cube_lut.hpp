@@ -26,6 +26,16 @@ struct error_metrics
     double rms = 0.0;
 };
 
+struct quantization_metrics
+{
+    double source_minimum = 0.0;
+    double source_maximum = 0.0;
+    std::size_t clipped_components = 0;
+    std::size_t clipped_samples = 0;
+    // Against the policy-adjusted float input, not the unclipped input or ideal lattice.
+    error_metrics quantization;
+};
+
 struct cube_metadata
 {
     std::string title;

@@ -40,9 +40,9 @@ jobs:
             LICENSE
           if-no-files-found: error
 
-      - name: Upload synthetic Rise validation fixtures
+      - name: Upload synthetic CUBE PNG and Rise validation fixtures
         uses: actions/upload-artifact@v4
         with:
-          name: ReShadeLUTBaker-Rise-fixtures
+          name: ReShadeLUTBaker-validation-fixtures
           path: build/fixtures/
           if-no-files-found: error

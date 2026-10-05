@@ -3,8 +3,11 @@
 
 #include "bake_control.hpp"
 #include "cube_lut.hpp"
+#include "png_lut.hpp"
 #include "rise_tex.hpp"
+#include "runtime_settings.hpp"
 #include "technique_catalog.hpp"
+#include "technique_preparation.hpp"
 #include "version.hpp"
 
 #include <Windows.h>
@@ -27,6 +30,7 @@
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -107,7 +111,8 @@ struct export_result
     std::size_t technique_count = 0;
     lut_baker::output_format format = lut_baker::output_format::cube;
     std::uint32_t lattice_size = 0;
-    lut_baker::rise_export_metrics rise_metrics;
+    lut_baker::quantization_metrics quantized_metrics;
+    lut_baker::png_layout png_distribution = lut_baker::png_layout::horizontal;
     std::vector<std::string> verified_techniques;
     std::string error;
     std::string warning;
@@ -139,8 +144,9 @@ struct runtime_state
     double last_duration_seconds = 0.0;
     lut_baker::error_metrics identity_metrics {};
     bool identity_metrics_valid = false;
-    lut_baker::rise_export_metrics rise_metrics;
-    bool rise_metrics_valid = false;
+    lut_baker::quantization_metrics quantized_metrics;
+    bool quantized_metrics_valid = false;
+    lut_baker::png_layout last_png_distribution = lut_baker::png_layout::horizontal;
 
     bool export_pending = false;
     technique_selection requested;
@@ -150,6 +156,8 @@ struct runtime_state
     std::uint32_t attempts = 0;
     lut_baker::bake_control bake_control;
     std::uint64_t reload_generation = 0;
+    lut_baker::settings_backup settings_backup;
+    std::string request_preset;
 
     bool capture_execution_events = false;
     command_list *capture_command_list = nullptr;
@@ -157,6 +165,8 @@ struct runtime_state
     std::vector<effect_technique> expected_execution;
     std::size_t execution_index = 0;
     bool execution_mismatch = false;
+    effect_technique current_execution {};
+    bool current_execution_rendered = false;
 
     bool submission_pending = false;
     bool submission_has_result = false;
@@ -187,10 +197,11 @@ void log_message(const reshade::log::level level, const std::string &message)
     reshade::log::message(level, complete.c_str());
 }
 
+template <typename Handle>
 std::string get_runtime_string(
     effect_runtime *runtime,
-    const effect_technique technique,
-    void (effect_runtime::*getter)(effect_technique, char *, std::size_t *) const)
+    const Handle technique,
+    void (effect_runtime::*getter)(Handle, char *, std::size_t *) const)
 {
     std::size_t size = 0;
     (runtime->*getter)(technique, nullptr, &size);
@@ -315,6 +326,189 @@ bool refresh_catalog(runtime_state &state)
     state.catalog_dirty = false;
     return true;
 }
+
+std::string current_preset_path(effect_runtime *runtime)
+{
+    std::size_t size = 0;
+    runtime->get_current_preset_path(nullptr, &size);
+    if (size == 0)
+        return {};
+    std::string result(size, '\0');
+    runtime->get_current_preset_path(result.data(), &size);
+    if (!result.empty() && result.back() == '\0')
+        result.pop_back();
+    return result;
+}
+
+// This adapter only reads/writes public CPU-side settings. It never saves a
+// preset, changes preprocessor definitions or accesses GPU resources.
+class runtime_settings_access
+{
+public:
+    runtime_settings_access(effect_runtime *runtime, const std::uint64_t &generation)
+        : runtime_(runtime), generation_(generation) {}
+
+    lut_baker::settings_result capture(lut_baker::runtime_settings &settings, std::string &error)
+    {
+        settings = {};
+        uniforms_.clear();
+        techniques_.clear();
+        error.clear();
+        try
+        {
+            settings.preset = current_preset_path(runtime_);
+            bindings_generation_ = generation_;
+            bindings_preset_ = settings.preset;
+            runtime_->enumerate_techniques(nullptr, [this, &settings](effect_runtime *runtime, const effect_technique technique) {
+                lut_baker::technique_setting entry;
+                entry.key.effect = get_runtime_string(runtime, technique, &effect_runtime::get_technique_effect_name);
+                entry.key.name = get_runtime_string(runtime, technique, &effect_runtime::get_technique_name);
+                entry.enabled = runtime->get_technique_state(technique);
+                settings.techniques.push_back(std::move(entry));
+                techniques_.push_back(technique);
+            });
+            if (settings.techniques.empty())
+                return lut_baker::settings_result::waiting;
+
+            std::size_t words = 0;
+            runtime_->enumerate_uniform_variables(nullptr, [this, &settings, &words](effect_runtime *runtime, const effect_uniform_variable variable) {
+                // 'source' uniforms are driven by ReShade or another add-on
+                // (time, frame count, input, etc.), not user grading settings.
+                std::size_t source_size = 0;
+                if (runtime->get_annotation_string_from_uniform_variable(variable, "source", nullptr, &source_size) && source_size > 1)
+                    return;
+
+                lut_baker::uniform_setting uniform;
+                uniform.effect = get_runtime_string(runtime, variable, &effect_runtime::get_uniform_variable_effect_name);
+                uniform.name = get_runtime_string(runtime, variable, &effect_runtime::get_uniform_variable_name);
+                format type = format::unknown;
+                runtime->get_uniform_variable_type(variable, &type, &uniform.rows, &uniform.columns, &uniform.array_length);
+                switch (type)
+                {
+                case format::r32_typeless: uniform.type = lut_baker::uniform_value_type::boolean; break;
+                case format::r32_sint: uniform.type = lut_baker::uniform_value_type::sint; break;
+                case format::r32_uint: uniform.type = lut_baker::uniform_value_type::uint; break;
+                case format::r32_float: uniform.type = lut_baker::uniform_value_type::real; break;
+                case format::r16_sint: uniform.type = lut_baker::uniform_value_type::sint16; break;
+                case format::r16_uint: uniform.type = lut_baker::uniform_value_type::uint16; break;
+                case format::r16_float: uniform.type = lut_baker::uniform_value_type::real16; break;
+                default: throw std::runtime_error("A shader parameter has an unsupported public API type.");
+                }
+                const std::size_t count = lut_baker::uniform_component_count(uniform);
+                if (count == 0 || count > lut_baker::settings_word_limit - words)
+                    throw std::runtime_error("Shader parameters exceed the 64 MiB settings-backup limit or have invalid dimensions.");
+                words += count;
+                uniform.words.resize(count);
+                switch (uniform.type)
+                {
+                case lut_baker::uniform_value_type::boolean:
+                {
+                    const auto values = std::make_unique<bool[]>(count);
+                    runtime->get_uniform_value_bool(variable, values.get(), count);
+                    for (std::size_t index = 0; index < count; ++index)
+                        uniform.words[index] = values[index] ? 1u : 0u;
+                    break;
+                }
+                case lut_baker::uniform_value_type::sint:
+                case lut_baker::uniform_value_type::sint16:
+                {
+                    std::vector<std::int32_t> values(count);
+                    runtime->get_uniform_value_int(variable, values.data(), count);
+                    std::memcpy(uniform.words.data(), values.data(), count * sizeof(std::uint32_t));
+                    break;
+                }
+                case lut_baker::uniform_value_type::uint:
+                case lut_baker::uniform_value_type::uint16:
+                    runtime->get_uniform_value_uint(variable, uniform.words.data(), count);
+                    break;
+                case lut_baker::uniform_value_type::real:
+                case lut_baker::uniform_value_type::real16:
+                {
+                    std::vector<float> values(count);
+                    runtime->get_uniform_value_float(variable, values.data(), count);
+                    std::memcpy(uniform.words.data(), values.data(), count * sizeof(std::uint32_t));
+                    break;
+                }
+                }
+                settings.uniforms.push_back(std::move(uniform));
+                uniforms_.push_back(variable);
+            });
+            if (!lut_baker::validate_runtime_settings(settings, error))
+                return lut_baker::settings_result::error;
+            return lut_baker::settings_result::ready;
+        }
+        catch (const std::exception &exception)
+        {
+            error = std::string("Could not capture live shader settings: ") + exception.what();
+            return lut_baker::settings_result::error;
+        }
+    }
+
+    void set_uniform(const std::size_t index, const lut_baker::uniform_setting &uniform)
+    {
+        check_bindings();
+        const auto variable = uniforms_.at(index);
+        const auto count = uniform.words.size();
+        switch (uniform.type)
+        {
+        case lut_baker::uniform_value_type::boolean:
+        {
+            const auto values = std::make_unique<bool[]>(count);
+            for (std::size_t component = 0; component < count; ++component)
+                values[component] = uniform.words[component] != 0;
+            runtime_->set_uniform_value_bool(variable, values.get(), count);
+            break;
+        }
+        case lut_baker::uniform_value_type::sint:
+        case lut_baker::uniform_value_type::sint16:
+        {
+            std::vector<std::int32_t> values(count);
+            std::memcpy(values.data(), uniform.words.data(), count * sizeof(std::uint32_t));
+            runtime_->set_uniform_value_int(variable, values.data(), count);
+            break;
+        }
+        case lut_baker::uniform_value_type::uint:
+        case lut_baker::uniform_value_type::uint16:
+            runtime_->set_uniform_value_uint(variable, uniform.words.data(), count);
+            break;
+        case lut_baker::uniform_value_type::real:
+        case lut_baker::uniform_value_type::real16:
+        {
+            std::vector<float> values(count);
+            std::memcpy(values.data(), uniform.words.data(), count * sizeof(std::uint32_t));
+            runtime_->set_uniform_value_float(variable, values.data(), count);
+            break;
+        }
+        }
+    }
+    void set_technique(const std::size_t index, const bool enabled)
+    {
+        check_bindings();
+        runtime_->set_technique_state(techniques_.at(index), enabled);
+    }
+    void reorder(const std::vector<std::size_t> &indices)
+    {
+        check_bindings();
+        std::vector<effect_technique> order;
+        order.reserve(indices.size());
+        for (const std::size_t index : indices)
+            order.push_back(techniques_.at(index));
+        runtime_->reorder_techniques(order.size(), order.data());
+    }
+
+private:
+    void check_bindings() const
+    {
+        if (generation_ != bindings_generation_ || current_preset_path(runtime_) != bindings_preset_)
+            throw std::runtime_error("The preset or effect catalog changed during settings recovery. No further values were applied to the new context.");
+    }
+    effect_runtime *runtime_;
+    const std::uint64_t &generation_;
+    std::uint64_t bindings_generation_ = 0;
+    std::string bindings_preset_;
+    std::vector<effect_uniform_variable> uniforms_;
+    std::vector<effect_technique> techniques_;
+};
 
 bool release_gpu_resources(gpu_resources &gpu, const bool teardown_after_runtime_idle = false)
 {
@@ -497,6 +691,8 @@ bool ensure_gpu_resources(runtime_state &state, std::string &error)
 
 void set_failure(runtime_state &state, const std::string &message)
 {
+    if (!state.settings_backup.pending())
+        state.settings_backup.clear();
     state.bake_control.stop();
     state.export_pending = false;
     state.capture_execution_events = false;
@@ -505,6 +701,68 @@ void set_failure(runtime_state &state, const std::string &message)
     state.detail = message;
     state.last_duration_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - state.request_started).count();
     log_message(reshade::log::level::error, message);
+}
+
+bool capture_settings_candidate(runtime_state &state)
+{
+    if (state.requested.empty())
+        return true;
+    runtime_settings_access access(state.runtime, state.reload_generation);
+    lut_baker::runtime_settings settings;
+    std::string error;
+    const auto result = access.capture(settings, error);
+    if (result == lut_baker::settings_result::waiting)
+    {
+        state.phase = operation_phase::compiling;
+        state.status = "Waiting for live shader settings";
+        return false;
+    }
+    if (result == lut_baker::settings_result::ready && settings.preset != state.request_preset)
+    {
+        set_failure(state, "The active preset changed before the bake could start. No LUT was written. Start a new export for the current preset.");
+        return false;
+    }
+    if (result == lut_baker::settings_result::error || !state.settings_backup.capture(std::move(settings)))
+    {
+        set_failure(state, "Live shader settings could not be backed up. No LUT was written. " +
+            (error.empty() ? "A previous compilation still needs settings recovery; wait for ReShade to finish." : error));
+        return false;
+    }
+    return true;
+}
+
+void restore_settings_when_ready(runtime_state &state)
+{
+    if (!state.settings_backup.can_restore(state.reload_generation))
+        return;
+    const auto saved = state.settings_backup.retain();
+    runtime_settings_access access(state.runtime, state.reload_generation);
+    std::string error;
+    lut_baker::settings_result result;
+    try
+    {
+        result = lut_baker::restore_runtime_settings(*saved, access, error);
+    }
+    catch (const std::exception &exception)
+    {
+        result = lut_baker::settings_result::error;
+        error = exception.what();
+    }
+    if (!state.settings_backup.pending() || state.settings_backup.retain() != saved)
+        return; // A reentrant context-change callback already cancelled recovery.
+    if (result == lut_baker::settings_result::waiting)
+        return; // Retain the backup if restoring an enabled state queued creation.
+    state.settings_backup.clear();
+    state.catalog_dirty = true;
+    if (result == lut_baker::settings_result::error)
+    {
+        set_failure(state, "Live settings recovery failed. No LUT was written. " + error +
+            " Check ReShade.log and reload any failed shader before retrying; failed effects are not forced to run.");
+        return;
+    }
+    log_message(reshade::log::level::info, "Restored live shader parameters, technique states and order after compilation. The preset was not saved.");
+    if (!state.export_pending)
+        state.detail += " Live shader parameters, technique states and order have now been restored.";
 }
 
 void check_bake_timeout(runtime_state &state)
@@ -518,6 +776,8 @@ void check_bake_timeout(runtime_state &state)
         std::string message = "Timed out waiting for the offscreen bake. No LUT was written. A selected shader probably failed to compile for the bake: check ReShade's Log tab or ReShade.log.";
         if (state.bake_control.waiting())
             message += " Waiting technique: " + technique_label(state.bake_control.waiting_key()) + '.';
+        if (state.settings_backup.pending())
+            message += " The settings backup is retained for recovery when ReShade finishes compiling. Another export remains blocked until recovery or an explicit effect reload.";
         set_failure(state, message);
     }
 }
@@ -534,6 +794,10 @@ void abort_export(runtime_state &state)
     state.detail = "No LUT was written. Shader compilation already queued in ReShade cannot be interrupted and may finish in the background.";
     if (state.submission_pending)
         state.detail += " Submitted GPU work will drain through its fence before another export is allowed.";
+    if (state.settings_backup.pending())
+        state.detail += " Unsaved settings will be restored when ReShade finishes compiling; another export stays blocked until recovery.";
+    else
+        state.settings_backup.clear();
     state.last_duration_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - state.request_started).count();
     // Leave request/requested and all submission/fence/resource state intact.
     log_message(reshade::log::level::info, state.status + ". " + state.detail);
@@ -654,12 +918,18 @@ export_result execute_export_job(export_job job) noexcept
     result.technique_count = job.technique_count;
     result.format = job.request.format;
     result.lattice_size = job.request.lattice_size;
+    result.png_distribution = job.request.png_distribution;
     result.warning = std::move(job.initial_warning);
 
     try
     {
         std::string error;
-        if (job.request.format == lut_baker::output_format::rise_tex)
+        if (!lut_baker::check_export_space(job.request, error))
+        {
+            result.error = error;
+            return result;
+        }
+        if (job.request.format != lut_baker::output_format::cube)
             result.verified_techniques = std::move(job.metadata.techniques);
         // Directory/name were snapshotted at queue time. Collision checks and
         // serialization are CPU-only; never access the runtime from here.
@@ -669,22 +939,33 @@ export_result execute_export_job(export_job job) noexcept
             result.error = "Unable to choose a non-existing output filename.";
             return result;
         }
-        const bool written = job.request.format == lut_baker::output_format::cube
-            ? lut_baker::write_cube_atomic(result.output, job.request.lattice_size, job.samples, job.metadata, false, error)
-            : lut_baker::write_rise_tex_atomic(result.output, job.request.lattice_size, job.samples, job.request.range, result.rise_metrics, error);
+        bool written = false;
+        switch (job.request.format)
+        {
+        case lut_baker::output_format::cube:
+            written = lut_baker::write_cube_atomic(result.output, job.request.lattice_size, job.samples, job.metadata, false, error);
+            break;
+        case lut_baker::output_format::rise_tex:
+            written = lut_baker::write_rise_tex_atomic(result.output, job.request.lattice_size, job.samples, job.request.range, result.quantized_metrics, error);
+            break;
+        case lut_baker::output_format::png:
+            written = lut_baker::write_png_lut_atomic(result.output, job.request.lattice_size, job.samples,
+                job.request.png_distribution, job.request.range, job.metadata, result.quantized_metrics, error);
+            break;
+        }
         if (!written)
         {
             result.error = std::string(lut_baker::output_format_name(job.request.format)) + " file write failed: " + error;
             return result;
         }
-        if (job.request.format == lut_baker::output_format::rise_tex && result.rise_metrics.clipped_components != 0)
+        if (job.request.format != lut_baker::output_format::cube && result.quantized_metrics.clipped_components != 0)
         {
             if (!result.warning.empty())
                 result.warning += " ";
             std::ostringstream clipping;
-            clipping << std::setprecision(9) << "Clamp to 0-1 clipped " << result.rise_metrics.clipped_components
-                     << " RGB value(s) in " << result.rise_metrics.clipped_samples << " sample(s). Original range: ["
-                     << result.rise_metrics.source_minimum << ", " << result.rise_metrics.source_maximum << "].";
+            clipping << std::setprecision(9) << "Clamp to 0-1 clipped " << result.quantized_metrics.clipped_components
+                     << " RGB value(s) in " << result.quantized_metrics.clipped_samples << " sample(s). Original range: ["
+                     << result.quantized_metrics.source_minimum << ", " << result.quantized_metrics.source_maximum << "].";
             result.warning += clipping.str();
         }
         result.success = true;
@@ -807,8 +1088,9 @@ bool poll_export_writer(runtime_state &state)
     state.last_lattice_size = result.lattice_size;
     state.last_technique_count = result.technique_count;
     state.warning = std::move(result.warning);
-    state.rise_metrics_valid = result.format == lut_baker::output_format::rise_tex;
-    state.rise_metrics = result.rise_metrics;
+    state.quantized_metrics_valid = result.format != lut_baker::output_format::cube;
+    state.quantized_metrics = result.quantized_metrics;
+    state.last_png_distribution = result.png_distribution;
     state.last_duration_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - state.request_started).count();
 
     std::ostringstream detail;
@@ -816,21 +1098,23 @@ bool poll_export_writer(runtime_state &state)
            << " " << result.lattice_size << "^3 | " << result.technique_count << " technique(s) | "
            << std::fixed << std::setprecision(3) << state.last_duration_seconds << " s";
     state.detail = detail.str();
+    if (result.format == lut_baker::output_format::png)
+        state.detail += std::string(" | ") + lut_baker::png_layout_name(result.png_distribution) + " | 8 bits per channel";
     if (!state.warning.empty())
         log_message(reshade::log::level::warning, state.warning);
     log_message(reshade::log::level::info, "Exported " + result.output.u8string());
-    if (state.rise_metrics_valid)
+    if (state.quantized_metrics_valid)
     {
-        const auto &metrics = state.rise_metrics;
+        const auto &metrics = state.quantized_metrics;
         std::ostringstream message;
-        message << std::setprecision(9) << "Rise TEX: RGB source range [" << metrics.source_minimum << ", " << metrics.source_maximum
+        message << std::setprecision(9) << lut_baker::output_format_name(result.format) << ": RGB source range [" << metrics.source_minimum << ", " << metrics.source_maximum
                 << "]; range policy " << (state.request.range == lut_baker::range_policy::clamp ? "explicit clamp" : "reject")
                 << "; clipped " << metrics.clipped_components << " components in " << metrics.clipped_samples << " samples"
                 << "; quantization max/mean/RMS " << metrics.quantization.maximum_absolute << "/"
                 << metrics.quantization.mean_absolute << "/" << metrics.quantization.rms;
         log_message(reshade::log::level::info, message.str());
         for (std::size_t index = 0; index < result.verified_techniques.size(); ++index)
-            log_message(reshade::log::level::info, "Rise technique " + std::to_string(index + 1) + ": " + result.verified_techniques[index]);
+            log_message(reshade::log::level::info, std::string(lut_baker::output_format_name(result.format)) + " technique " + std::to_string(index + 1) + ": " + result.verified_techniques[index]);
     }
     return true;
 }
@@ -838,6 +1122,13 @@ bool poll_export_writer(runtime_state &state)
 // Submit, compilation and fence polling share one stable progress label.
 void set_compile_progress(runtime_state &state)
 {
+    if (state.bake_control.initializing())
+    {
+        state.status = "Preparing shader resources";
+        state.detail = "ReShade is initializing the shader's normal resources before the floating-point bake. Its original disabled state has already been restored. Technique: " +
+            technique_label(state.bake_control.waiting_key());
+        return;
+    }
     std::ostringstream status;
     status << "Compiling shaders (attempt " << state.attempts << ')';
     state.status = status.str();
@@ -851,6 +1142,8 @@ void process_bake(runtime_state &state, command_queue *present_queue)
     std::lock_guard<std::recursive_mutex> lock(state.mutex);
     if (state.destroyed)
         return;
+
+    restore_settings_when_ready(state);
 
     if (poll_export_writer(state))
         return;
@@ -900,6 +1193,13 @@ void process_bake(runtime_state &state, command_queue *present_queue)
     if (!state.export_pending)
         return;
 
+    if (state.settings_backup.pending())
+    {
+        state.phase = operation_phase::compiling;
+        set_compile_progress(state);
+        return;
+    }
+
     if (!state.bake_control.can_attempt(state.reload_generation))
     {
         state.phase = operation_phase::compiling;
@@ -929,6 +1229,55 @@ void process_bake(runtime_state &state, command_queue *present_queue)
     {
         set_failure(state, "A selected technique disappeared during the bake: " + missing);
         return;
+    }
+
+    if (!capture_settings_candidate(state))
+        return;
+
+    // Do not request an offscreen permutation before ReShade has created the
+    // default permutation's shared resources. This is required even if the
+    // shader was parsed/compiled and appears in the catalog while disabled.
+    // Check on every attempt: a real effect reload can invalidate earlier work.
+    const std::uint64_t preparation_generation = state.reload_generation;
+    for (const technique_entry &entry : ordered)
+    {
+        state.settings_backup.arm(preparation_generation);
+        const auto preparation = lut_baker::prepare_default_technique(
+            [&state, &entry] { return state.runtime->get_technique_state(entry.handle); },
+            [&state, &entry](const bool enabled) { state.runtime->set_technique_state(entry.handle, enabled); },
+            [&state] {
+                bool available = false;
+                state.runtime->enumerate_techniques(nullptr, [&available](effect_runtime *, effect_technique) { available = true; });
+                return available;
+            });
+        if (preparation != lut_baker::technique_preparation::waiting)
+            state.settings_backup.disarm();
+        if (preparation == lut_baker::technique_preparation::restore_failed)
+        {
+            set_failure(state, "ReShade did not restore the disabled state of " + technique_label(entry.key) +
+                ". No LUT was written. Another add-on may have blocked the change; disable this technique in ReShade and check the other add-ons before retrying.");
+            return;
+        }
+        if (preparation == lut_baker::technique_preparation::rejected)
+        {
+            set_failure(state, "ReShade could not prepare the normal resources of " + technique_label(entry.key) +
+                ". No LUT was written. Check ReShade.log for a shader/resource error or another add-on blocking initialization, then reload the effect before retrying.");
+            return;
+        }
+        if (preparation == lut_baker::technique_preparation::waiting)
+        {
+            if (!state.bake_control.wait_for_initialization(entry.key, preparation_generation))
+            {
+                set_failure(state, "The normal resources of " + technique_label(entry.key) +
+                    " are still unavailable after initialization. No LUT was written and no further retry will be made. Check ReShade.log and reload the effect before retrying.");
+                return;
+            }
+            log_message(reshade::log::level::info, "Waiting for default resource initialization of " + technique_label(entry.key) +
+                "; its disabled state was restored before rendering. Offscreen rendering will wait until those resources are ready.");
+            state.phase = operation_phase::compiling;
+            set_compile_progress(state);
+            return;
+        }
     }
 
     std::string error;
@@ -964,7 +1313,12 @@ void process_bake(runtime_state &state, command_queue *present_queue)
     for (const technique_entry &entry : ordered)
     {
         const std::size_t before = state.execution_index;
+        state.current_execution = entry.handle;
+        state.current_execution_rendered = false;
+        state.settings_backup.arm(attempt_reload_generation);
         state.runtime->render_technique(entry.handle, command_list, state.gpu.target_rtv, state.gpu.target_rtv);
+        if (state.current_execution_rendered)
+            state.settings_backup.disarm();
         // Stop at the first missing event. Later techniques must never run on
         // a partial chain or enqueue more compilation while ReShade is loading.
         if (state.execution_mismatch || state.execution_index != before + 1)
@@ -975,6 +1329,8 @@ void process_bake(runtime_state &state, command_queue *present_queue)
     }
 
     state.capture_execution_events = false;
+    if (!state.settings_backup.pending())
+        state.settings_backup.clear();
     ++state.attempts;
 
     if (state.execution_mismatch || state.execution_index != state.expected_execution.size())
@@ -1024,23 +1380,49 @@ void process_bake(runtime_state &state, command_queue *present_queue)
 void begin_export(runtime_state &state)
 {
     std::lock_guard<std::recursive_mutex> lock(state.mutex);
-    if (state.export_pending || state.submission_pending || state.writer_pending)
+    if (state.export_pending || state.submission_pending || state.writer_pending || state.settings_backup.pending())
         return;
 
-    if (state.catalog_dirty)
-        refresh_catalog(state);
+    if (state.catalog_dirty && !refresh_catalog(state) && !state.selected.empty())
+    {
+        state.phase = operation_phase::error;
+        state.status = "ReShade is still loading effects";
+        state.detail = "No bake was queued. Wait for shader loading to finish before exporting grading.";
+        return;
+    }
+
+    bool performance_mode = false; // ReShade defaults to normal mode if absent.
+    (void)reshade::get_config_value(state.runtime, "GENERAL", "PerformanceMode", performance_mode);
+    if (!state.selected.empty() && performance_mode)
+    {
+        state.phase = operation_phase::error;
+        state.status = "Performance mode is not supported for grading bakes";
+        state.detail = "No bake was queued. Performance mode compiles saved parameters as shader constants, so unsaved settings cannot be restored reliably. Turn Performance mode off and let ReShade reload before baking. Identity exports remain available.";
+        log_message(reshade::log::level::error, state.detail);
+        return;
+    }
 
     lut_baker::export_request request;
     std::string error;
     if (!lut_baker::snapshot_export_request(state.preferences, state.output_filename.data(), output_directory(), request, error))
     {
         state.phase = operation_phase::error;
-        state.status = "Invalid output filename";
+        state.status = "Invalid export settings";
         state.detail = error;
+        log_message(reshade::log::level::error, error);
+        return;
+    }
+    if (!lut_baker::check_export_space(request, error))
+    {
+        state.phase = operation_phase::error;
+        state.status = "Export could not start";
+        state.detail = error;
+        log_message(reshade::log::level::error, error);
         return;
     }
 
     state.requested = state.selected;
+    state.request_preset = state.requested.empty() ? std::string() : current_preset_path(state.runtime);
 
     state.request = std::move(request);
     state.export_pending = true;
@@ -1050,7 +1432,7 @@ void begin_export(runtime_state &state)
     state.warning.clear();
     state.last_output.clear();
     state.identity_metrics_valid = false;
-    state.rise_metrics_valid = false;
+    state.quantized_metrics_valid = false;
     state.request_started = std::chrono::steady_clock::now();
     state.attempts = 0;
     state.bake_control.start(state.request_started);
@@ -1091,7 +1473,7 @@ void on_finish_present(command_queue *queue, swapchain *swapchain)
             continue;
 
         update_source_snapshot(*state, swapchain);
-        if (state->export_pending || state->submission_pending || state->writer_pending)
+        if (state->export_pending || state->submission_pending || state->writer_pending || state->settings_backup.pending())
             process_bake(*state, queue);
     }
 }
@@ -1110,6 +1492,9 @@ void on_render_technique(
     std::lock_guard<std::recursive_mutex> lock(state->mutex);
     if (!state->capture_execution_events)
         return;
+
+    if (command_list == state->capture_command_list && rtv == state->capture_rtv && technique == state->current_execution)
+        state->current_execution_rendered = true;
 
     if (command_list != state->capture_command_list || rtv != state->capture_rtv ||
         state->execution_index >= state->expected_execution.size() ||
@@ -1147,6 +1532,7 @@ void on_destroy_effect_runtime(effect_runtime *runtime)
     state->bake_control.stop();
     state->export_pending = false;
     state->capture_execution_events = false;
+    state->settings_backup.clear(); // Handles/settings belong to the old device.
     // ReShade invokes this callback from runtime reset after it has idled the
     // graphics queue, so even quarantined handles are safe to destroy here.
     (void)release_gpu_resources(state->gpu, true);
@@ -1160,6 +1546,37 @@ void on_reloaded_effects(effect_runtime *runtime)
         return;
     std::lock_guard<std::recursive_mutex> lock(state->mutex);
     ++state->reload_generation;
+    state->catalog_dirty = true;
+    if (state->settings_backup.pending())
+    {
+        // ReShade also emits this event immediately after destroying a catalog.
+        // Do not apply an old backup to newly replaced effects by name alone.
+        bool available = false;
+        runtime->enumerate_techniques(nullptr, [&available](effect_runtime *, effect_technique) { available = true; });
+        if (!available)
+        {
+            state->settings_backup.clear();
+            set_failure(*state, "The effect catalog was explicitly reloaded/replaced before settings recovery completed. No LUT was written. The old backup was discarded to avoid applying it to different effects; configure the reloaded effects before retrying.");
+            return;
+        }
+        restore_settings_when_ready(*state);
+    }
+}
+
+void on_set_current_preset_path(effect_runtime *runtime, const char *path)
+{
+    const auto state = find_state(runtime);
+    if (state == nullptr)
+        return;
+    std::lock_guard<std::recursive_mutex> lock(state->mutex);
+    const std::string preset = path != nullptr ? path : "";
+    const bool active_changed = state->export_pending && !state->writer_pending && !state->request_preset.empty() && preset != state->request_preset;
+    const bool recovery_changed = state->settings_backup.pending() && preset != state->settings_backup.saved().preset;
+    if (active_changed || recovery_changed)
+    {
+        state->settings_backup.clear();
+        set_failure(*state, "The active preset changed during the bake/settings recovery. No LUT was written. Settings from the previous preset were not applied to the new one; start a new export for the current preset.");
+    }
     state->catalog_dirty = true;
 }
 
@@ -1196,7 +1613,7 @@ const ImVec4 color_busy(0.26f, 0.48f, 0.80f, 1.0f);
 
 bool is_busy(const runtime_state &state)
 {
-    return state.export_pending || state.submission_pending || state.writer_pending;
+    return state.export_pending || state.submission_pending || state.writer_pending || state.settings_backup.pending();
 }
 
 std::string to_lower(std::string value)
@@ -1286,7 +1703,8 @@ void draw_header(const runtime_state &state)
     if (ImGui::CollapsingHeader("How it works and limitations"))
     {
         ImGui::Indent();
-        wrapped_bullet("Bakes the combined color transform of the selected techniques into a single 3D LUT. It runs on an offscreen floating-point target; technique on/off states in ReShade are never changed.");
+        wrapped_bullet("Bakes the combined color transform of the selected techniques into a single 3D LUT. It runs on an offscreen floating-point target. Disabled techniques are briefly enabled to prepare their resources, then restored before any rendering. The preset is not saved or changed.");
+        wrapped_bullet("Keeps unsaved shader parameters, technique states and order in memory while ReShade compiles. It restores and verifies them before continuing the bake. Performance mode must be off for grading exports.");
         ImGui::PushStyleColor(ImGuiCol_Text, color_warning);
         wrapped_bullet("A 3D LUT maps color to color only. Spatial, temporal, depth-based, random or dithered effects (blur, sharpening, bloom, film grain, vignette...) cannot be captured.");
         ImGui::PopStyleColor();
@@ -1424,8 +1842,9 @@ struct output_format_option
 };
 
 const output_format_option format_options[] = {
-    { lut_baker::output_format::cube, "CUBE", "CUBE", ".cube", "Standard .cube 3D LUT. 16, 32 or 64 points per axis, float precision; values outside 0-1 are kept. Loadable by ReShadeLUTPreview.fx." },
+    { lut_baker::output_format::cube, "CUBE", "CUBE", ".cube", "A 3D lookup table (.cube). Float values are preserved, including values outside 0-1. Choose 16, 32, 64, 128 or a custom size from 2 to 128. Loadable by ReShadeLUTPreview.fx." },
     { lut_baker::output_format::rise_tex, "Monster Hunter Rise", "Rise TEX", ".tex.28", "Native Monster Hunter Rise LUT (TEX v28). Fixed 32x32x32, 8 bits per channel; values limited to 0-1." },
+    { lut_baker::output_format::png, "PNG", "PNG", ".png", "A 3D lookup table stored in a PNG image for compatible shaders. The file uses 8 bits per channel and values in 0-1. Choose Horizontal strip or Square tiles. Not loadable by ReShadeLUTPreview.fx." },
 };
 
 const output_format_option &find_format_option(const lut_baker::output_format format)
@@ -1473,38 +1892,122 @@ void draw_output_settings(runtime_state &state)
         ImGui::EndCombo();
     }
 
-    field_label("LUT size");
-    if (state.preferences.format == lut_baker::output_format::cube)
+    const bool is_png = state.preferences.format == lut_baker::output_format::png;
+    if (is_png)
     {
-        static const std::uint32_t sizes[] = { 16u, 32u, 64u };
+        field_label("Layout");
+        int layout = state.preferences.png_distribution == lut_baker::png_layout::square ? 1 : 0;
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::Combo("##png_layout", &layout, "Horizontal strip\0Square tiles\0"))
+            state.preferences.png_distribution = layout == 1 ? lut_baker::png_layout::square : lut_baker::png_layout::horizontal;
+        ImGui::SetItemTooltip("Horizontal strip: one row of slices, for example 4096x64 at size 64.\nSquare tiles: a square grid of slices, for example 512x512 at size 64. This is not Hald layout.");
+    }
+    field_label("LUT size");
+    if (state.preferences.format != lut_baker::output_format::rise_tex)
+    {
+        static const std::uint32_t sizes[] = { 16u, 32u, 64u, 128u };
+        static const char *const tips[] = {
+            "Smallest files. Suitable for simple grading.",
+            "More samples than 16, with relatively small files.",
+            "Recommended for most grading. Good balance between accuracy and file size.",
+            "Usually overkill. Eight times as many samples as 64. Larger files and higher memory use."
+        };
         for (const std::uint32_t size : sizes)
         {
             if (size != sizes[0])
                 ImGui::SameLine();
-            const std::string label = lattice_label(size);
-            if (ImGui::RadioButton(label.c_str(), state.preferences.cube_size == size))
-                state.preferences.cube_size = size;
+            const bool unavailable = is_png && state.preferences.png_distribution == lut_baker::png_layout::square && size != 16 && size != 64;
+            ImGui::BeginDisabled(unavailable);
+            const std::string label = std::to_string(size) + u8"\u00B3";
+            const bool selected = is_png ? state.preferences.png_size == size : !state.preferences.cube_custom && state.preferences.cube_size == size;
+            if (ImGui::RadioButton(label.c_str(), selected))
+            {
+                if (is_png)
+                    state.preferences.png_size = size;
+                else
+                {
+                    state.preferences.cube_size = size;
+                    state.preferences.cube_custom = false;
+                }
+            }
+            ImGui::EndDisabled();
+            const std::size_t tip_index = size == 16 ? 0u : size == 32 ? 1u : size == 64 ? 2u : 3u;
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            {
+                if (unavailable)
+                    ImGui::SetTooltip("This size needs padding for Square tiles. Choose 16 or 64, or switch to Horizontal strip.");
+                else if (is_png && size == 128)
+                    ImGui::SetTooltip("%s\nThe horizontal strip is 16384 pixels wide. The reader must support that width.", tips[tip_index]);
+                else
+                    ImGui::SetTooltip("%s", tips[tip_index]);
+            }
         }
-        help_marker("Points per axis. Higher is more accurate and produces a larger file.");
+        if (!is_png)
+        {
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Custom", state.preferences.cube_custom))
+                state.preferences.cube_custom = true;
+            ImGui::SetItemTooltip("Choose an integer from 2 to 128 points per axis. Other applications may have their own size limits.");
+            if (state.preferences.cube_custom)
+            {
+                field_label("Custom size");
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+                ImGui::InputInt("##custom_cube_size", &state.preferences.custom_cube_size);
+                ImGui::SetItemTooltip("Allowed range: 2 to 128. Values outside the range are rejected before baking.");
+            }
+        }
+        help_marker("Points per color axis. More points can reduce interpolation error, but increase file size and memory use. The maximum is 128.");
     }
     else
     {
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("32x32x32, 8-bit");
+        ImGui::TextUnformatted(u8"32\u00B3, 8-bit");
         ImGui::SameLine();
         ImGui::TextDisabled("(fixed)");
         ImGui::SetItemTooltip("Monster Hunter Rise LUTs are always 32x32x32 with 8 bits per RGB channel.");
 
+    }
+    if (state.preferences.format != lut_baker::output_format::cube)
+    {
         field_label("Range");
-        bool clamp = state.preferences.rise_range == lut_baker::range_policy::clamp;
+        auto &policy = is_png ? state.preferences.png_range : state.preferences.rise_range;
+        bool clamp = policy == lut_baker::range_policy::clamp;
         if (ImGui::Checkbox("Clamp to 0-1", &clamp))
-            state.preferences.rise_range = clamp ? lut_baker::range_policy::clamp : lut_baker::range_policy::reject;
-        help_marker("Rise TEX stores RGB in 0-1 only; no gamma conversion is applied.\n"
+            policy = clamp ? lut_baker::range_policy::clamp : lut_baker::range_policy::reject;
+        help_marker("This format stores values in 0-1 with 8 bits per channel. No gamma conversion is applied.\n"
             "Off: an export with values outside 0-1 is rejected and nothing is written.\n"
             "On: those values are clamped, and the result reports the original range and how many were clipped.");
 
         skip_field_label();
-        disabled_wrapped("ReShadeLUTPreview.fx cannot load TEX. Verify the result in-game.");
+        disabled_wrapped(is_png ? "Use a PNG-compatible shader with matching layout and size. ReShadeLUTPreview.fx loads CUBE only." : "ReShadeLUTPreview.fx cannot load TEX. Verify the result in-game.");
+    }
+
+    std::string settings_error;
+    if (!lut_baker::validate_export_preferences(state.preferences, settings_error))
+    {
+        skip_field_label();
+        ImGui::PushStyleColor(ImGuiCol_Text, color_error);
+        ImGui::TextWrapped("%s", settings_error.c_str());
+        ImGui::PopStyleColor();
+    }
+    else
+    {
+        lut_baker::export_request estimate_request;
+        estimate_request.format = state.preferences.format;
+        estimate_request.lattice_size = lut_baker::effective_lattice_size(state.preferences);
+        estimate_request.png_distribution = state.preferences.png_distribution;
+        lut_baker::export_estimate estimate;
+        if (lut_baker::estimate_export(estimate_request, estimate, settings_error))
+        {
+            skip_field_label();
+            if (is_png)
+                ImGui::TextDisabled("%ux%u pixels, 8 bits per channel", estimate.image_width, estimate.image_height);
+            else
+                ImGui::TextDisabled("%llu RGB samples", static_cast<unsigned long long>(estimate.samples));
+            skip_field_label();
+            ImGui::TextDisabled("File budget: %.1f MiB", static_cast<double>(estimate.file_bytes) / (1024 * 1024));
+            ImGui::SetItemTooltip("A conservative file budget, not the exact file size. MiB means 1,048,576 bytes. Free space is checked before baking and again before writing, with a further 16 MiB reserve.");
+        }
     }
 
     field_label("File name");
@@ -1539,12 +2042,16 @@ void draw_output_settings(runtime_state &state)
 
 void draw_export_button(runtime_state &state)
 {
+    std::string settings_error;
+    const bool valid = lut_baker::validate_export_preferences(state.preferences, settings_error);
     const lut_baker::output_format format = state.preferences.format;
     const std::uint32_t size = lut_baker::effective_lattice_size(state.preferences);
     const std::string target = std::string(find_format_option(format).short_name) + ' ' + lattice_label(size);
 
     std::string label;
-    if (state.selected.empty())
+    if (!valid)
+        label = "Correct output settings";
+    else if (state.selected.empty())
         label = "Export identity LUT  (GPU validation)  -  " + target;
     else
         label = "Bake " + std::to_string(state.selected.size()) + (state.selected.size() == 1 ? " technique" : " techniques") + "  -  " + target;
@@ -1552,12 +2059,16 @@ void draw_export_button(runtime_state &state)
 
     ImGui::Spacing();
     const ImGuiStyle &style = ImGui::GetStyle();
+    ImGui::BeginDisabled(!valid);
     ImGui::PushStyleColor(ImGuiCol_Button, style.Colors[ImGuiCol_ButtonHovered]);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, style.Colors[ImGuiCol_ButtonActive]);
     if (ImGui::Button(label.c_str(), ImVec2(-FLT_MIN, ImGui::GetFrameHeight() * 1.6f)))
         begin_export(state);
     ImGui::PopStyleColor(2);
-    if (state.selected.empty())
+    ImGui::EndDisabled();
+    if (!valid && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("%s", settings_error.c_str());
+    else if (state.selected.empty())
         ImGui::SetItemTooltip("Nothing is selected: exports an identity LUT (no color change) and verifies that the GPU reproduces it within floating-point tolerance.");
 }
 
@@ -1567,7 +2078,9 @@ void draw_progress(runtime_state &state)
     // A negative fraction draws ImGui's indeterminate animation: the number of
     // compile retries and the GPU latency are not known in advance.
     ImGui::PushStyleColor(ImGuiCol_PlotHistogram, color_busy);
-    ImGui::ProgressBar(-1.0f * static_cast<float>(ImGui::GetTime()), ImVec2(-FLT_MIN, ImGui::GetFrameHeight() * 1.6f), state.status.c_str());
+    const char *const progress_label = state.settings_backup.pending() && !state.export_pending
+        ? "Waiting for settings recovery" : state.status.c_str();
+    ImGui::ProgressBar(-1.0f * static_cast<float>(ImGui::GetTime()), ImVec2(-FLT_MIN, ImGui::GetFrameHeight() * 1.6f), progress_label);
     ImGui::PopStyleColor();
     ImGui::BeginDisabled(!lut_baker::can_abort_export(state.export_pending, state.writer_pending));
     if (ImGui::Button("Cancel export"))
@@ -1621,6 +2134,8 @@ void draw_result(runtime_state &state)
             ImGui::TableSetupColumn("##value", ImGuiTableColumnFlags_WidthStretch);
             metric_row("File", "%s", state.last_output.filename().u8string().c_str());
             metric_row("Format", "%s %s", lut_baker::output_format_name(state.last_format), lattice_label(state.last_lattice_size).c_str());
+            if (state.last_format == lut_baker::output_format::png)
+                metric_row("Layout", "%s, 8 bits per channel", lut_baker::png_layout_name(state.last_png_distribution));
             if (state.last_technique_count == 0)
                 metric_row("Techniques", "none (identity)");
             else
@@ -1637,7 +2152,7 @@ void draw_result(runtime_state &state)
         ImGui::PopStyleColor();
     }
 
-    if (state.identity_metrics_valid || state.rise_metrics_valid)
+    if (state.identity_metrics_valid || state.quantized_metrics_valid)
     {
         ImGui::SetNextItemOpen(true, ImGuiCond_Once);
         if (ImGui::TreeNode("Validation metrics"))
@@ -1651,9 +2166,9 @@ void draw_result(runtime_state &state)
                     const auto &metrics = state.identity_metrics;
                     metric_row("Identity error (max / mean / RMS)","%.9g / %.9g / %.9g", metrics.maximum_absolute, metrics.mean_absolute, metrics.rms);
                 }
-                if (state.rise_metrics_valid)
+                if (state.quantized_metrics_valid)
                 {
-                    const auto &metrics = state.rise_metrics;
+                    const auto &metrics = state.quantized_metrics;
                     metric_row("Source RGB range", "[%.9g, %.9g]", metrics.source_minimum, metrics.source_maximum);
                     metric_row("Clipped values / samples", "%zu / %zu", metrics.clipped_components, metrics.clipped_samples);
                     metric_row("8-bit quantization error (max / mean / RMS)","%.9g / %.9g / %.9g",
@@ -1661,7 +2176,7 @@ void draw_result(runtime_state &state)
                 }
                 ImGui::EndTable();
             }
-            if (state.rise_metrics_valid)
+            if (state.quantized_metrics_valid)
                 disabled_wrapped("Quantization error is measured after the range check (and after clamping, if enabled) and is separate from the GPU identity error.");
             ImGui::TreePop();
         }
@@ -1717,6 +2232,7 @@ void register_callbacks()
     reshade::register_event<reshade::addon_event::destroy_effect_runtime>(on_destroy_effect_runtime);
     reshade::register_event<reshade::addon_event::finish_present>(on_finish_present);
     reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(on_reloaded_effects);
+    reshade::register_event<reshade::addon_event::reshade_set_current_preset_path>(on_set_current_preset_path);
     reshade::register_event<reshade::addon_event::reshade_set_technique_state>(on_set_technique_state);
     reshade::register_event<reshade::addon_event::reshade_render_technique>(on_render_technique);
     reshade::register_event<reshade::addon_event::reshade_reorder_techniques>(on_reorder_techniques);
@@ -1728,6 +2244,7 @@ void unregister_callbacks()
     reshade::unregister_event<reshade::addon_event::reshade_render_technique>(on_render_technique);
     reshade::unregister_event<reshade::addon_event::reshade_set_technique_state>(on_set_technique_state);
     reshade::unregister_event<reshade::addon_event::reshade_reloaded_effects>(on_reloaded_effects);
+    reshade::unregister_event<reshade::addon_event::reshade_set_current_preset_path>(on_set_current_preset_path);
     reshade::unregister_event<reshade::addon_event::finish_present>(on_finish_present);
     reshade::unregister_event<reshade::addon_event::destroy_effect_runtime>(on_destroy_effect_runtime);
     reshade::unregister_event<reshade::addon_event::init_effect_runtime>(on_init_effect_runtime);
@@ -1737,7 +2254,7 @@ void unregister_callbacks()
 
 extern "C" __declspec(dllexport) const char *NAME = "ReShade LUT Baker";
 extern "C" __declspec(dllexport) const char *AUTHOR = "ISpectre23";
-extern "C" __declspec(dllexport) const char *DESCRIPTION = "Bakes the color grading of selected ReShade techniques into a 3D LUT (.cube) or a supported game's native LUT format.";
+extern "C" __declspec(dllexport) const char *DESCRIPTION = "Bakes the color grading of selected ReShade techniques into a 3D LUT (.cube), a compatible PNG image or a supported game's native LUT format.";
 
 BOOL APIENTRY DllMain(HMODULE module, const DWORD reason, LPVOID)
 {

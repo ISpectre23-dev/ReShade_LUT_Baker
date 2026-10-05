@@ -1,24 +1,29 @@
 # ReShade LUT Baker
 
-ReShade LUT Baker is a ReShade add-on that exports the combined RGB transformation of selected techniques as a floating-point 3D `.cube` LUT.
+ReShade LUT Baker is a ReShade add-on that exports the combined color grading of selected techniques as a 3D lookup table (LUT).
 
-Version **1.1.0** also exports native **Monster Hunter Rise `.tex.28`** LUTs directly from the same floating-point bake. CUBE remains the default; Rise uses a fixed 32³ lattice and quantizes only the final CPU output to 8-bit RGB. Native loading and visual SDR/HDR equivalence of these new exports still require in-game testing.
+Version **1.1.0** exports floating-point **CUBE**, compatibility **PNG**, and native **Monster Hunter Rise `.tex.28`** files from the same floating-point bake. CUBE 64³ remains the default. PNG and Rise convert only the final CPU result to 8 bits per color channel. Native Rise loading and visual SDR/HDR equivalence still require in-game testing.
 
 It evaluates a neutral RGB lattice directly through ReShade, preserving the real technique execution order and avoiding screenshot, PNG, DDS, or other image intermediates. The default export is a 64³ LUT containing 262,144 RGB samples.
 
-Selected techniques can be baked whether they are currently enabled or disabled. The baker executes them directly and does not change the preset or the user's enabled technique states.
+Selected techniques can be baked whether they are currently enabled or disabled. Before rendering, the baker briefly enables each disabled technique through ReShade's API to request its normal resources, then immediately restores its disabled state. It does not save or edit the preset. Already enabled techniques are left alone.
+
+Unsaved shader parameters, technique states and order are backed up in memory before requesting shader initialization or an offscreen shader version. After compilation, the baker restores and verifies those settings before continuing. This protects all loaded effects, including ones that are not selected for the bake.
 
 An optional companion shader, [`ReShadeLUTPreview.fx`](shaders/ReShadeLUTPreview.fx), is included for applying and comparing exported LUTs inside ReShade.
 
 ## Features
 
 - Exports standard floating-point `.cube` 3D LUT files.
+- Exports 8-bit PNG lookup tables as Horizontal strip or Square tiles.
 - Exports the verified Monster Hunter Rise 32³ RGBA8 `.tex.28` profile directly, without a converter or image intermediary.
-- 64³ output by default, with 16³ and 32³ also available.
+- CUBE 64³ by default, with 16³, 32³, 128³ and Custom sizes from 2 to 128.
 - Uses ReShade's actual relative technique order.
-- Supports baking selected techniques without changing their enabled state.
+- Supports baking disabled techniques, restoring their state before rendering.
+- Preserves unsaved parameters, technique states and execution order across bake-triggered compilation.
 - Uses an RGBA32F bake target when available, with RGBA16F as an explicit fallback.
-- Preserves finite shader output below 0 and above 1 in CUBE; Rise rejects it unless explicit clipping is enabled.
+- Preserves finite shader output below 0 and above 1 in CUBE; PNG and Rise reject it unless explicit clipping is enabled.
+- Shows a conservative file budget and checks free space before baking and writing.
 - Verifies the expected ReShade technique execution sequence before writing a LUT.
 - Uses GPU completion fences before readback.
 - Writes LUT files atomically and never overwrites an existing named export.
@@ -26,7 +31,7 @@ An optional companion shader, [`ReShadeLUTPreview.fx`](shaders/ReShadeLUTPreview
 
 ## What can be baked
 
-A 3D LUT can represent a deterministic mapping from one RGB triplet to another.
+A 3D LUT can represent a deterministic mapping from one red, green and blue (RGB) triplet to another.
 
 The best candidates are color-grading techniques whose output depends only on the input pixel color. Multiple compatible techniques can be selected and baked together, and their transformations are applied in ReShade's real relative execution order.
 
@@ -49,6 +54,7 @@ The baker deliberately does not attempt to classify shaders automatically. The s
 
 - Windows x64
 - ReShade 6.8.0 with full add-on support or newer*
+- Normal mode for grading exports. Performance mode must be off; identity exports remain available in either mode.
 - A renderer supported by ReShade whose graphics queue can render/copy RGBA32F or RGBA16F textures and create a completion fence
 
 *The implementation targets ReShade add-on API 20 and is audited and compiled against the official ReShade 6.8.0 source. Newer ReShade versions are expected to work while they remain API-compatible, but future compatibility is not guaranteed. Older versions are not supported.
@@ -69,17 +75,29 @@ The optional preview shader can be copied into any configured ReShade Effect Sea
 1. Configure the grading techniques and their uniforms as desired.
 2. Open **Add-ons > ReShade LUT Baker**.
 3. Under **Techniques**, tick exactly the techniques to bake (click the checkbox or anywhere on the row). They are listed in ReShade execution order; the **Active** dot shows whether each one is currently enabled in ReShade.
-4. Under **Output**, pick the **Format** from the dropdown. CUBE defaults to 64x64x64 with 16x16x16/32x32x32 available. Monster Hunter Rise always uses 32x32x32; switching back preserves the CUBE size preference.
-5. Optionally enter a **File name** (basename or complete matching suffix). The line below the field shows the exact name that will be written. Leaving it empty creates `ReShade_LUT_YYYYMMDD_HHMMSS.cube` or `.tex.28`, depending on the format.
+4. Under **Output**, pick **CUBE**, **PNG** or **Monster Hunter Rise**. CUBE offers 16³, 32³, 64³, 128³ and **Custom**. PNG has a separate size preference and a **Layout** selector. Rise always uses 32³. Switching formats preserves the other formats' preferences.
+5. Optionally enter a **File name** (basename or complete matching suffix). The line below the field shows the exact name that will be written. Leaving it empty creates `ReShade_LUT_YYYYMMDD_HHMMSS.cube`, `.png` or `.tex.28`.
 6. Press the bake button. Its label states what will be written, for example **Bake 3 techniques - CUBE 64x64x64**. With nothing selected it reads **Export identity LUT (GPU validation)**.
 
 **Select active** replaces the current selection with exactly the techniques that are enabled at that moment, **Clear** deselects everything and **Refresh** re-reads the technique list. The filter field narrows the list by effect or technique name without changing the selection.
 
-While a bake runs, the settings are locked and a progress bar shows the current step. **Cancel export** stops a queued bake, compilation wait or GPU readback wait without writing a LUT. It is disabled once the validated CPU result starts file writing; that atomic writer must finish. Cancellation does not interrupt ReShade's already queued shader compilation or submitted GPU commands. GPU resources are retained until their completion fence is observed, so another export may briefly remain unavailable. No selected technique state or active request snapshot is changed by the cancellation. The **Result** section then reports the written file, format, technique count and duration, any warnings and validation metrics, with **Open output folder** and **Copy file name** (handy for `ReShadeLUTPreview.fx`). The accuracy limitations are listed under **How it works and limitations**.
+While a bake runs, the settings are locked and a progress bar shows the current step. **Cancel export** stops a queued bake, compilation wait or GPU readback wait without writing a LUT. It is disabled once the validated CPU result starts file writing; that atomic writer must finish. Cancellation does not interrupt ReShade's already queued shader compilation or submitted GPU commands. GPU resources are retained until their completion fence is observed. The settings backup is also retained until queued compilation finishes and live settings can be recovered, even after cancellation or a timeout. Another export stays blocked during that recovery. A late completion restores settings but does not restart the cancelled bake. The active request snapshot is never edited by cancellation. The **Result** section then reports the written file, format, technique count and duration, any warnings and validation metrics, with **Open output folder** and **Copy file name** (handy for `ReShadeLUTPreview.fx`). The accuracy limitations are listed under **How it works and limitations**.
 
 After effects are reloaded, valid selections are preserved and techniques that no longer exist are removed automatically. An active bake keeps its own immutable selection snapshot, so a later catalog refresh cannot silently change the requested export.
 
-During the first attempt, ReShade may need to compile a custom offscreen effect permutation. The baker stops at the first technique without a render event, waits for ReShade's **effects-reloaded** event and then verifies it once. If that exact technique still does not execute, the export fails explicitly rather than repeatedly requesting its compilation. Each subsequently encountered technique can have its own initialization cycle; every full-chain attempt starts with a fresh identity lattice and retains ReShade's relative order. A 60-second overall deadline also covers reload and GPU waits and is checked from the panel, even if matching presentation callbacks stop. A separate 30-second GPU submission timeout retains the in-flight resources safely. It also fails without writing a file if a requested technique disappears, the execution sequence differs from the expected order, allocation/readback fails, a non-finite result is found, or the file cannot be committed.
+An effect that has never been enabled may be compiled but still lack its normal GPU resources. ReShade 6.8.0 creates the shared constant buffer (which holds shader parameters) only when initializing the normal effect, not an offscreen permutation (a shader version for a different target). The baker requests that initialization first and restores the disabled state in the same callback, before any rendering. It waits for ReShade's **effects-reloaded** event and verifies readiness before requesting an offscreen permutation. A failure or an add-on veto stops the export without writing a LUT. If another add-on blocks restoration, the error explicitly tells you which technique to disable. See [ReShade's resource initialization](https://github.com/crosire/reshade/blob/v6.8.0/source/runtime.cpp) and [technique state API](https://github.com/crosire/reshade/blob/v6.8.0/source/runtime_api.cpp).
+
+ReShade may then need to compile a custom offscreen effect permutation. The baker stops at the first technique without a render event, waits for the effects-reloaded event and verifies it once. If that exact technique still does not execute, the export fails explicitly rather than repeatedly requesting its compilation. Default resource initialization and offscreen compilation have separate bounded waits for each exact technique. Every full-chain attempt starts with a fresh identity lattice and retains ReShade's relative order. A 60-second overall deadline covers both stages, reload and GPU waits. It is checked from the panel even if matching presentation callbacks stop. A separate 30-second GPU submission timeout retains the in-flight resources safely. The baker also fails without writing a file if a requested technique disappears, the execution sequence differs from the expected order, allocation/readback fails, a non-finite result is found, or the file cannot be committed.
+
+### Preserving unsaved settings
+
+ReShade 6.8.0 reapplies the saved preset when a new offscreen permutation finishes compiling. Without protection, that replaces unsaved parameters, enabled states and sorting, and can bake the saved grading instead of the live grading. Cached permutations do not take that reload path.
+
+The baker captures ordinary shader parameters, enabled technique states and the complete runtime order before each attempt. Once compilation completes, it queries fresh API handles, checks identities/types/dimensions, restores changed values and verifies them before executing the chain again. No preset is saved and no backup file is created. The in-memory parameter data is limited to 64 MiB. Dynamic uniforms with a `source` annotation, such as time or frame count, are not frozen. Private shader/add-on state and temporal GPU history are not part of this backup.
+
+Duplicate identities, a changed parameter layout or a blocked restoration stop the export explicitly. A shader that failed to compile is never forced to run. Changing to another preset cancels the request and discards the old backup without applying it to the new preset. An explicit effect reload/replacement also discards a pending backup rather than guessing that newly created effects are the old ones. Avoid changing the preset or manually reloading effects while a bake/recovery is pending.
+
+**Performance mode** embeds saved parameter values as compile-time constants. Restoring ordinary uniforms would not reliably change those constants. The baker therefore rejects selected-technique exports in that mode. Turn it off and let ReShade reload before baking. The baker never changes the mode automatically, and zero-selection identity exports remain available.
 
 For example, Lilium's SDR TRC fix conditionally defines its technique based on buffer format/color space. Its usual SDR configuration does **not** define that technique on this baker's RGBA32F/RGBA16F offscreen target. ReShade 6.8.0 rejects permutations with different technique/uniform declarations. Such a shader cannot safely be baked unchanged with the public API: the baker stops and logs the exact non-executing technique, without lowering precision or changing shader preprocessor settings to manufacture a different transformation. ReShade itself may mark an effect as failed/disabled when its permutation fails; the baker cannot cancel or roll back ReShade's internal compiler through the public API. If necessary, reload effects after stopping the bake. See [ReShade's permutation validation](https://github.com/crosire/reshade/blob/v6.8.0/source/runtime.cpp) and [Lilium's shader](https://github.com/EndlesslyFlowering/ReShade_HDR_shaders/blob/master/Shaders/lilium__sdr_trc_fix.fx).
 
@@ -93,7 +111,7 @@ Exports are written to:
 
 Existing exports are not overwritten. If a requested filename already exists, a numeric suffix such as `_001` is added automatically.
 
-For Rise the full suffix is retained: `MyGrade.tex.28`, then `MyGrade_001.tex.28`. A collision that occurs during the final atomic commit causes an explicit failure, never an overwrite. Format, effective size, name, output directory and range policy are snapshotted when the request is queued and cannot change during its bake/readback/worker.
+For Rise the full suffix is retained: `MyGrade.tex.28`, then `MyGrade_001.tex.28`. A collision during the final atomic commit fails explicitly, never overwrites. Format, effective size, PNG layout, name, output directory and range policy are captured when the request is queued. Editing preferences cannot change an active export.
 
 Each CUBE file contains:
 
@@ -111,6 +129,45 @@ Rows use standard CUBE order with red changing fastest, then green, then blue.
 CUBE values are serialized with `std::numeric_limits<float>::max_digits10`, which is sufficient for binary32 round trips. Finite values outside the 0 to 1 output range are retained.
 
 The default 0 to 1 input domain is also the domain handled correctly by ReShade 6.8.0's native CUBE texture loader.
+
+### CUBE size and storage limits
+
+The size is the number of points per color axis, not the color bit depth. **64³** remains the recommended default. **128³** has eight times as many samples and can reduce interpolation error for demanding grading. It does not recover information already lost by an effect. The size labels use cubic notation, such as **64³**; recommendations appear only in their tooltips.
+
+**Custom** accepts integers from **2 to 128**, including sizes such as 33, 48, 65 and 96. Invalid values disable export and are rejected again at queue time. Other applications may impose different size limits. Set the companion shader's `LUT_BAKER_CUBE_SIZE` to the same value.
+
+A 128³ lattice has 2,097,152 samples. One four-channel, 32-bit float buffer needs 32 MiB, compared with 4 MiB for 64³. The baker and ReShade need several buffers, so this is not total memory use. MiB means 1,048,576 bytes.
+
+The panel shows a conservative **File budget**, not a prediction of compression or exact file size. Free space is checked on the output volume before the bake and again on the writer, with an additional 16 MiB reserve. The 128³ CUBE data budget is about 96 MiB before that reserve. Space can change after either check; write failures still use the existing temporary-file cleanup. These limits do not prevent many accumulated exports from filling a drive. The baker never deletes older exports automatically.
+
+### PNG compatibility export
+
+Choose **PNG**, then choose a layout. PNG and CUBE are separate output formats; a bake writes only the requested file.
+
+| Size | Horizontal strip | Square tiles |
+|---|---|---|
+| 16³ | 256 × 16 | 64 × 64, 4 × 4 tiles |
+| 32³ | 1024 × 32 | Not available without padding |
+| 64³ | 4096 × 64 | 512 × 512, 8 × 8 tiles |
+| 128³ | 16384 × 128 | Not available without padding |
+
+Each tile is one blue-channel slice. Red increases from left to right within a tile; green increases from top to bottom. Blue slices progress left to right, then top to bottom in Square tiles. Both layouts contain the same samples. **Square tiles is not Hald layout**, even when both images measure 512 × 512. The output shader must support the exact layout and size. The baker does not add unused tiles or silently change size when switching layouts. If the existing PNG size is unsupported, choose 16 or 64 to enable export.
+
+For the common horizontal `LUT.fx`, add the output folder to ReShade's texture search paths and configure:
+
+```hlsl
+#define fLUT_TextureName "MyGrade.png"
+#define fLUT_TileSizeXY 64
+#define fLUT_TileAmount 64
+```
+
+Reload effects after changing the file or definitions. `LUT.fx` expects the horizontal layout, not Square tiles. Check the reader's texture limits before choosing a 128³ strip: it is 16384 pixels wide. Square tiles must be used with a reader that supports that grid. `ReShadeLUTPreview.fx` remains CUBE-only; it has not been changed to load PNG.
+
+PNG uses **8 bits per RGB channel**, with no alpha. The GPU bake and readback still use floating point. Final conversion rounds `value * 255` to the nearest integer with half values rounded up. No gamma conversion, dithering or color profile is added. Windows' built-in PNG encoder compresses those bytes losslessly; it does not preserve the original float precision. The image includes the exporter version in its Software text metadata. Verified technique order and range/quantization metrics are recorded in ReShade's log.
+
+Values outside 0 to 1 fail by default. **Clamp to 0-1** explicitly clips them and reports the original range, affected components/samples and quantization error. The quantization error excludes clipping loss and is separate from GPU identity validation. Prefer CUBE when retaining float values or outputs outside 0 to 1 matters. No screenshot, PNG intermediate or display-bit-depth conversion is involved in producing CUBE or Rise.
+
+The PNG path uses [Windows Imaging Component](https://learn.microsoft.com/en-us/windows/win32/wic/png-format-overview), Windows' built-in image encoder. It requires no bundled image library. The real PNG writer and both layouts are tested offline; final visual comparison through third-party shaders still requires ReShade testing.
 
 ### Monster Hunter Rise output
 
@@ -224,6 +281,7 @@ The repository includes both runtime and offline validation paths:
 - `tools/validate_cube.py identity` compares an export against the ideal red-fastest identity lattice.
 - `tools/validate_cube.py compare` compares every lattice node of two generated LUTs and reports maximum, mean and RMS RGB error.
 - `tools/validate_rise_tex.py inspect` checks the exact Rise profile, byte count and alpha. `identity` measures against ideal nodes; `compare-cube` compares TEX nodes against a matching 32³ float CUBE, optionally with explicit `--clamp`.
+- `tools/validate_png.py` decodes and checks PNG files using only Python's standard library. Specify `--layout horizontal` or `--layout square`; dimensions alone cannot distinguish Square tiles from Hald.
 - `ReShadeLUTPreview.fx` provides a practical visual apply/split/difference comparison on game content.
 
 Examples:
@@ -245,9 +303,21 @@ See [BUILDING.md](BUILDING.md) for reproducible Visual Studio 2022/CMake build c
 
 A Windows GitHub Actions workflow builds the `.addon64` and runs the C++ and Python tests.
 
-The C++ tests cover technique-selection reconciliation, duplicate identity changes, select-currently-enabled semantics, lattice dimensions/order, identity metrics, FP16 conversion, filename safety and atomic non-overwriting output. Rise tests additionally cover exact header/payload, channel axes, rounding, non-finite/range rejection, explicit clipping, unchanged CUBE samples, format snapshots, final-commit collisions and cleanup after write/serializer failures.
+The C++ tests cover technique-selection reconciliation, duplicate identity changes, select-currently-enabled semantics, lattice dimensions/order, identity metrics, FP16 conversion, filename safety and atomic non-overwriting output. Technique-preparation tests exercise the production helper against a model of ReShade's initialization branches: a never-enabled effect must prepare its normal constant buffer before any offscreen request. They cover immediate state restoration, separate bounded waits, allocation/compile failure, add-on vetoes, exceptions and cancellation. These are policy tests, not a live ReShade/GPU test. Format tests cover all presets, custom boundaries and odd sizes, immutable snapshots, independent preferences and storage budgets. PNG tests cover every packed RGB byte in both layouts, quantization, non-finite/range rejection, explicit clipping and the real Windows encoder. Rise tests retain their exact header/payload and failure-cleanup checks.
 
-Python tests cover strict parsing, ordering, identity metrics, comparison metrics and malformed-file rejection. CTest also generates files using the real C++ writers and verifies every TEX byte against an independent Python float32/quantization reference, plus CUBE 16³/32³/64³ identity and float round trips. The optional `rise_tex_fixtures` executable generates identity and asymmetric axes fixtures for validation; no auxiliary grading shaders or game assets are included. See [BUILDING.md](BUILDING.md) for commands.
+Runtime-settings tests use the production restoration helper with a fake settings API. They reproduce the saved-preset reset across multiple compilation cycles, verify exact float/integer/boolean/vector/matrix/array values and full technique order, protect unselected effects, and exercise late recovery after cancellation/timeout. They also check new presets, changed or ambiguous identities/layouts, deferred resource creation and rejected writes. This does not replace in-game validation of actual ReShade callbacks and GPU execution.
+
+Python tests cover strict parsing, ordering, identity/comparison metrics and malformed-file rejection. The PNG decoder checks chunk checksums, all five row filters, opaque alpha, decoded-size bounds and absence of color-space metadata. CTest generates files with the real C++ writers and verifies every TEX byte, every PNG pixel and CUBE float round trips at 2³, 16³, 32³, 33³, 64³, 65³ and 128³ against independent references. The optional `rise_tex_fixtures` executable generates validation fixtures for all formats; no auxiliary grading shaders or game assets are included. See [BUILDING.md](BUILDING.md) for commands.
+
+Useful PNG checks for a real export:
+
+```powershell
+python -B tools/validate_png.py identity Identity64.png --layout horizontal
+python -B tools/validate_png.py identity Identity64Square.png --layout square
+python -B tools/validate_png.py compare-cube MyGrade.png MyGrade.cube --layout horizontal
+```
+
+Use `--clamp` on `compare-cube` only when that PNG was exported with explicit clamping. The default tolerance includes half an 8-bit step and float32 identity error. For an actual 16-bit float GPU fallback, add its separately measured identity error to the comparison tolerance; do not interpret it as PNG quantization alone.
 
 ## Technical references
 

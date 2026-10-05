@@ -17,23 +17,34 @@ bool ends_with(const std::string_view value, const std::string_view suffix)
 {
     return value.size() >= suffix.size() && value.substr(value.size() - suffix.size()) == suffix;
 }
+
+bool preset_size(const std::uint32_t size)
+{
+    return size == 16 || size == 32 || size == 64 || size == 128;
+}
 }
 
 namespace lut_baker
 {
 const char *output_extension(const output_format format) noexcept
 {
-    return format == output_format::rise_tex ? ".tex.28" : ".cube";
+    return format == output_format::png ? ".png" : format == output_format::rise_tex ? ".tex.28" : ".cube";
 }
 
 const char *output_format_name(const output_format format) noexcept
 {
-    return format == output_format::rise_tex ? "Monster Hunter Rise TEX" : "CUBE";
+    return format == output_format::png ? "PNG" : format == output_format::rise_tex ? "Monster Hunter Rise TEX" : "CUBE";
 }
 
 std::uint32_t effective_lattice_size(const export_preferences &preferences) noexcept
 {
-    return preferences.format == output_format::rise_tex ? 32u : preferences.cube_size;
+    if (preferences.format == output_format::rise_tex)
+        return 32;
+    if (preferences.format == output_format::png)
+        return preferences.png_size;
+    return preferences.cube_custom
+        ? (preferences.custom_cube_size > 0 ? static_cast<std::uint32_t>(preferences.custom_cube_size) : 0u)
+        : preferences.cube_size;
 }
 
 bool validate_output_filename(const std::string_view value, std::string &normalized, std::string &error,
@@ -85,6 +96,15 @@ bool validate_output_filename(const std::string_view value, std::string &normali
     {
         error = "Use a Rise basename without the .cube extension.";
         return false;
+    }
+    const auto basename = normalized.substr(0, normalized.size() - suffix.size());
+    for (const char *const other_suffix : { ".cube", ".png", ".tex.28" })
+    {
+        if (suffix != other_suffix && ends_with(basename, other_suffix))
+        {
+            error = "The name contains another export format's extension. Use a basename or the matching extension.";
+            return false;
+        }
     }
 
     std::string stem = normalized.substr(0, normalized.find('.'));
@@ -155,21 +175,139 @@ std::string filename_for_format(const std::string_view filename, const output_fo
 bool snapshot_export_request(const export_preferences &preferences, const std::string_view filename,
     const std::filesystem::path &directory, export_request &request, std::string &error)
 {
-    if ((preferences.format != output_format::cube && preferences.format != output_format::rise_tex) ||
-        (preferences.cube_size != 16 && preferences.cube_size != 32 && preferences.cube_size != 64) ||
-        (preferences.rise_range != range_policy::reject && preferences.rise_range != range_policy::clamp))
-    {
-        error = "Invalid export format, LUT size or range policy.";
+    if (!validate_export_preferences(preferences, error))
         return false;
-    }
     export_request snapshot;
     snapshot.format = preferences.format;
     snapshot.lattice_size = effective_lattice_size(preferences);
-    snapshot.range = preferences.format == output_format::rise_tex ? preferences.rise_range : range_policy::reject;
+    snapshot.range = preferences.format == output_format::rise_tex ? preferences.rise_range :
+        preferences.format == output_format::png ? preferences.png_range : range_policy::reject;
+    snapshot.png_distribution = preferences.png_distribution;
     snapshot.directory = directory;
     if (!validate_output_filename(filename, snapshot.filename, error, snapshot.format))
         return false;
     request = std::move(snapshot);
     return true;
+}
+
+bool validate_export_preferences(const export_preferences &preferences, std::string &error)
+{
+    if (preferences.format != output_format::cube && preferences.format != output_format::rise_tex && preferences.format != output_format::png)
+    {
+        error = "Unknown export format. Choose CUBE, PNG or Monster Hunter Rise.";
+        return false;
+    }
+    if (preferences.format == output_format::cube)
+    {
+        if (preferences.cube_custom ? preferences.custom_cube_size < 2 || preferences.custom_cube_size > 128 : !preset_size(preferences.cube_size))
+        {
+            error = "CUBE size must be an integer from 2 to 128. Choose a preset or correct the custom size.";
+            return false;
+        }
+    }
+    else if (preferences.format == output_format::png)
+    {
+        if (!preset_size(preferences.png_size) ||
+            (preferences.png_distribution != png_layout::horizontal && preferences.png_distribution != png_layout::square))
+        {
+            error = "Invalid PNG size or layout. Choose a listed size and a layout.";
+            return false;
+        }
+        if (preferences.png_distribution == png_layout::square && preferences.png_size != 16 && preferences.png_size != 64)
+        {
+            error = "Square tiles require size 16 or 64 without padding. Choose one of those sizes or Horizontal strip.";
+            return false;
+        }
+    }
+    const range_policy policy = preferences.format == output_format::png ? preferences.png_range : preferences.rise_range;
+    if (policy != range_policy::reject && policy != range_policy::clamp)
+    {
+        error = "Invalid range policy. Choose whether to reject or clamp values outside 0-1.";
+        return false;
+    }
+    return true;
+}
+
+bool estimate_export(const export_request &request, export_estimate &estimate, std::string &error)
+{
+    estimate = {};
+    if (!valid_lut_size(request.lattice_size))
+    {
+        error = "Export size must be from 2 to 128. No bake was started.";
+        return false;
+    }
+    estimate.samples = static_cast<std::uint64_t>(request.lattice_size) * request.lattice_size * request.lattice_size;
+    estimate.float_buffer_bytes = estimate.samples * 16;
+    switch (request.format)
+    {
+    case output_format::cube:
+        // At most 15 characters per finite float at max_digits10, plus separators.
+        // Allow one MiB for comments/header. The capacity check adds a further reserve.
+        estimate.file_bytes = estimate.samples * 48 + 1024 * 1024;
+        return true;
+    case output_format::rise_tex:
+        if (request.lattice_size != 32)
+            break;
+        estimate.file_bytes = 56 + estimate.samples * 4;
+        return true;
+    case output_format::png:
+        if (request.png_distribution == png_layout::horizontal)
+        {
+            estimate.image_width = request.lattice_size * request.lattice_size;
+            estimate.image_height = request.lattice_size;
+        }
+        else if (request.png_distribution == png_layout::square && (request.lattice_size == 16 || request.lattice_size == 64))
+        {
+            const std::uint32_t tiles = request.lattice_size == 16 ? 4u : 8u;
+            estimate.image_width = estimate.image_height = request.lattice_size * tiles;
+        }
+        else
+            break;
+        // RGB scanlines and worst-case deflate/chunk overhead fit comfortably here.
+        estimate.file_bytes = estimate.samples * 4 + 1024 * 1024;
+        return true;
+    }
+    estimate = {};
+    error = "Invalid export size or layout. Correct the output settings before baking.";
+    return false;
+}
+
+bool check_export_capacity(const std::uint64_t available, const export_estimate &estimate, std::string &error)
+{
+    constexpr std::uint64_t reserve = 16 * 1024 * 1024;
+    if (estimate.file_bytes == 0 || available < estimate.file_bytes || available - estimate.file_bytes < reserve)
+    {
+        error = "Not enough free space for this export and a 16 MiB safety reserve. No file was written. Free space or choose a smaller size.";
+        return false;
+    }
+    return true;
+}
+
+bool check_export_space(const export_request &request, std::string &error)
+{
+    export_estimate estimate;
+    if (!estimate_export(request, estimate, error))
+        return false;
+    std::error_code filesystem_error;
+    auto directory = std::filesystem::absolute(request.directory, filesystem_error);
+    while (!filesystem_error && !directory.empty() && !std::filesystem::exists(directory, filesystem_error))
+    {
+        const auto parent = directory.parent_path();
+        if (parent == directory)
+            break;
+        directory = parent;
+    }
+    const auto capacity = filesystem_error || directory.empty() ? std::filesystem::space_info {} : std::filesystem::space(directory, filesystem_error);
+    if (!filesystem_error && !directory.empty() && !std::filesystem::is_directory(directory, filesystem_error))
+    {
+        error = "The output path contains a file where a folder is needed. No file was written. Move or rename the file blocking the output folder.";
+        return false;
+    }
+    if (filesystem_error || directory.empty() || capacity.available == static_cast<std::uintmax_t>(-1))
+    {
+        error = "Cannot check free space in the output folder. No file was written. Check the folder's permissions and storage availability.";
+        return false;
+    }
+    return check_export_capacity(capacity.available, estimate, error);
 }
 }

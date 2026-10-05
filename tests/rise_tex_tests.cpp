@@ -188,7 +188,7 @@ int main()
     expect(rise_snapshot.format == output_format::rise_tex && rise_snapshot.lattice_size == 32 && rise_snapshot.filename == "rise.tex.28" && rise_snapshot.directory == directory && rise_snapshot.range == range_policy::clamp, "active format, size, directory, name, policy immutable across switch");
     export_request cube16_snapshot;
     expect(snapshot_export_request(preferences, "next", directory, cube16_snapshot, error) && cube16_snapshot.lattice_size == 16, "next CUBE request uses new preferences independently");
-    preferences.cube_size = 128;
+    preferences.cube_size = 129;
     expect(!snapshot_export_request(preferences, "invalid", directory, cube16_snapshot, error) && cube16_snapshot.filename == "next.cube", "invalid settings do not overwrite snapshot");
 
     const auto output = directory / "identity.tex.28";

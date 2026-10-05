@@ -75,13 +75,19 @@ add_library(reshade_lut_core STATIC
   src/cube_lut.hpp
   src/export_settings.cpp
   src/export_settings.hpp
+  src/png_lut.cpp
+  src/png_lut.hpp
   src/rise_tex.cpp
   src/rise_tex.hpp
+  src/runtime_settings.cpp
+  src/runtime_settings.hpp
   src/technique_catalog.hpp
+  src/technique_preparation.hpp
 )
 target_compile_features(reshade_lut_core PUBLIC cxx_std_17)
 target_include_directories(reshade_lut_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_definitions(reshade_lut_core PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(reshade_lut_core PUBLIC windowscodecs ole32)
 
 add_library(ReShadeLUTBaker SHARED
   src/addon.cpp
@@ -137,6 +143,16 @@ if(BUILD_TESTING)
     target_compile_options(rise_tex_fixtures PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
   endif()
   add_test(NAME rise_tex_tests COMMAND rise_tex_tests)
+
+  foreach(test_name IN ITEMS export_formats_tests png_lut_tests technique_preparation_tests runtime_settings_tests)
+    add_executable(${test_name} "tests/${test_name}.cpp")
+    target_link_libraries(${test_name} PRIVATE reshade_lut_core)
+    target_compile_definitions(${test_name} PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    if(MSVC)
+      target_compile_options(${test_name} PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
+    endif()
+    add_test(NAME ${test_name} COMMAND ${test_name})
+  endforeach()
 
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)

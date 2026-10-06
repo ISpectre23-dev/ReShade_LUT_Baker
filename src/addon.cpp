@@ -953,9 +953,6 @@ export_result execute_export_job(export_job job) noexcept
             written = lut_baker::write_rise_tex_atomic(result.output, job.request.lattice_size, job.samples, job.request.range, result.quantized_metrics, error);
             break;
         case lut_baker::output_format::wilds_tex:
-            if (!result.warning.empty())
-                result.warning += " ";
-            result.warning += "Wilds grades in a logarithmic color domain and this export does not convert to it, so the in-game look may differ from your ReShade grading.";
             written = lut_baker::write_wilds_tex_atomic(result.output, job.request.lattice_size, job.samples, result.quantized_metrics, error);
             break;
         case lut_baker::output_format::png:
@@ -1862,7 +1859,7 @@ const output_format_option format_options[] = {
     { lut_baker::output_format::cube, "CUBE", "CUBE", ".cube", false, "A 3D lookup table (.cube). Float values are preserved, including values outside 0-1. Choose 16, 32, 64, 128 or a custom size from 2 to 128." },
     { lut_baker::output_format::png, "PNG", "PNG", ".png", false, "A 3D lookup table stored in a PNG image. Choose 8 or 16 bits per channel, with values in 0-1. Choose Horizontal strip or Square tiles. The reader must support the layout and bit depth." },
     { lut_baker::output_format::rise_tex, "Monster Hunter Rise", "Rise TEX", ".tex.28", true, "Native Monster Hunter Rise LUT (TEX v28). Fixed 32x32x32, 8 bits per channel; values limited to 0-1." },
-    { lut_baker::output_format::wilds_tex, "Monster Hunter Wilds", "Wilds TEX", ".tex.241106027", true, "Native Monster Hunter Wilds LUT (TEX v241106027). Fixed 33x33x33, 16-bit float per channel. Values are not converted to the game's logarithmic color domain." },
+    { lut_baker::output_format::wilds_tex, "Monster Hunter Wilds (experimental)", "Wilds TEX", ".tex.241106027", true, "Experimental. Native Monster Hunter Wilds LUT (TEX v241106027). Fixed 33x33x33, 16-bit float per channel. Values are not converted to the game's logarithmic color domain." },
 };
 
 const output_format_option &find_format_option(const lut_baker::output_format format)
@@ -2051,7 +2048,7 @@ void draw_output_settings(runtime_state &state)
         disabled_wrapped("RGB values from -65504 to 65504 are kept, rounded to 16-bit float. No clamping or gamma conversion is applied.");
         skip_field_label();
         ImGui::PushStyleColor(ImGuiCol_Text, color_warning);
-        ImGui::TextWrapped("Wilds grades in a logarithmic color domain and this export does not convert to it, so the in-game look may differ from your ReShade grading.");
+        ImGui::TextWrapped("Experimental: in-game results are not reliable yet. Wilds grades in a logarithmic color domain and this export does not convert to it, so the in-game look may differ from your ReShade grading.");
         ImGui::PopStyleColor();
     }
 

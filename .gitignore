@@ -23,6 +23,7 @@ CMakeUserPresets.json
 # Generated LUTs and validation caches
 /LUT_Bakes/
 *.cube
+*.tex.28
 __pycache__/
 *.py[cod]
 
@@ -31,3 +32,6 @@ __pycache__/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Local archive, not published
+/archive/

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "export_settings.hpp"
+
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -24,6 +26,16 @@ struct error_metrics
     double rms = 0.0;
 };
 
+struct quantization_metrics
+{
+    double source_minimum = 0.0;
+    double source_maximum = 0.0;
+    std::size_t clipped_components = 0;
+    std::size_t clipped_samples = 0;
+    // Against the policy-adjusted float input, not the unclipped input or ideal lattice.
+    error_metrics quantization;
+};
+
 struct cube_metadata
 {
     std::string title;
@@ -41,10 +53,6 @@ struct cube_metadata
 [[nodiscard]] error_metrics measure_identity_error(const std::vector<float4> &samples, std::uint32_t size);
 [[nodiscard]] std::uint16_t float_to_half(float value) noexcept;
 [[nodiscard]] float half_to_float(std::uint16_t value) noexcept;
-
-[[nodiscard]] bool validate_output_filename(std::string_view value, std::string &normalized, std::string &error);
-[[nodiscard]] std::string make_timestamped_filename();
-[[nodiscard]] std::filesystem::path make_unique_output_path(const std::filesystem::path &directory, const std::string &filename);
 
 [[nodiscard]] bool write_cube_atomic(
     const std::filesystem::path &destination,

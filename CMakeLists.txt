@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.23)
 
-project(ReShadeLUTBaker VERSION 1.0.2 LANGUAGES CXX)
+project(ReShadeLUTBaker VERSION 1.1.0 LANGUAGES CXX)
 
 if(NOT WIN32)
   message(FATAL_ERROR "ReShade LUT Baker builds as a Windows ReShade add-on.")
@@ -14,6 +14,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>")
 
 set(RESHADE_SDK_ROOT "" CACHE PATH "Path to a ReShade source checkout")
 set(IMGUI_ROOT "" CACHE PATH "Path to the Dear ImGui checkout used by ReShade")
@@ -67,13 +68,26 @@ if(NOT EXISTS "${IMGUI_ROOT}/imgui.h")
 endif()
 
 add_library(reshade_lut_core STATIC
+  src/atomic_output.cpp
+  src/atomic_output.hpp
+  src/bake_control.hpp
   src/cube_lut.cpp
   src/cube_lut.hpp
+  src/export_settings.cpp
+  src/export_settings.hpp
+  src/png_lut.cpp
+  src/png_lut.hpp
+  src/rise_tex.cpp
+  src/rise_tex.hpp
+  src/runtime_settings.cpp
+  src/runtime_settings.hpp
   src/technique_catalog.hpp
+  src/technique_preparation.hpp
 )
 target_compile_features(reshade_lut_core PUBLIC cxx_std_17)
 target_include_directories(reshade_lut_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_definitions(reshade_lut_core PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(reshade_lut_core PUBLIC windowscodecs ole32)
 
 add_library(ReShadeLUTBaker SHARED
   src/addon.cpp
@@ -112,11 +126,43 @@ if(BUILD_TESTING)
   endif()
   add_test(NAME cube_core_tests COMMAND cube_core_tests)
 
+  add_executable(bake_control_tests tests/bake_control_tests.cpp)
+  target_link_libraries(bake_control_tests PRIVATE reshade_lut_core)
+  if(MSVC)
+    target_compile_options(bake_control_tests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
+  endif()
+  add_test(NAME bake_control_tests COMMAND bake_control_tests)
+
+  add_executable(rise_tex_tests tests/rise_tex_tests.cpp)
+  target_link_libraries(rise_tex_tests PRIVATE reshade_lut_core)
+  target_compile_definitions(rise_tex_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+  add_executable(rise_tex_fixtures tools/rise_tex_fixtures.cpp)
+  target_link_libraries(rise_tex_fixtures PRIVATE reshade_lut_core)
+  if(MSVC)
+    target_compile_options(rise_tex_tests PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
+    target_compile_options(rise_tex_fixtures PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
+  endif()
+  add_test(NAME rise_tex_tests COMMAND rise_tex_tests)
+
+  foreach(test_name IN ITEMS export_formats_tests png_lut_tests technique_preparation_tests runtime_settings_tests)
+    add_executable(${test_name} "tests/${test_name}.cpp")
+    target_link_libraries(${test_name} PRIVATE reshade_lut_core)
+    target_compile_definitions(${test_name} PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    if(MSVC)
+      target_compile_options(${test_name} PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
+    endif()
+    add_test(NAME ${test_name} COMMAND ${test_name})
+  endforeach()
+
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)
     add_test(
-      NAME cube_python_tests
+      NAME python_validator_tests
       COMMAND "${Python3_EXECUTABLE}" -B -m unittest discover -s "${CMAKE_CURRENT_SOURCE_DIR}/tests" -p "test_*.py"
+    )
+    add_test(
+      NAME writer_fixture_reference
+      COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_writer_fixtures.py" "$<TARGET_FILE:rise_tex_fixtures>"
     )
   endif()
 endif()

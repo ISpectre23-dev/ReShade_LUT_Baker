@@ -26,9 +26,22 @@ jobs:
       - name: Run tests
         run: ctest --test-dir build -C Release --output-on-failure
 
+      - name: Generate synthetic validation fixtures
+        run: build/Release/rise_tex_fixtures.exe build/fixtures
+
       - name: Upload add-on
         uses: actions/upload-artifact@v4
         with:
           name: ReShadeLUTBaker-x64
-          path: build/Release/ReShadeLUTBaker.addon64
+          path: |
+            build/Release/ReShadeLUTBaker.addon64
+            README.txt
+            LICENSE
+          if-no-files-found: error
+
+      - name: Upload synthetic CUBE PNG and Rise validation fixtures
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReShadeLUTBaker-validation-fixtures
+          path: build/fixtures/
           if-no-files-found: error

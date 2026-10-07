@@ -35,9 +35,8 @@ jobs:
           name: ReShadeLUTBaker-x64
           path: |
             build/Release/ReShadeLUTBaker.addon64
-            README.md
+            README.txt
             LICENSE
-            docs/images/
           if-no-files-found: error
 
       - name: Upload synthetic CUBE PNG and Rise validation fixtures

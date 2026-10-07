@@ -1,4 +1,10 @@
-# ReShade LUT Baker
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/lockup-horizontal-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/images/lockup-horizontal-light.svg">
+    <img alt="ReShade LUT Baker" src="docs/images/lockup-horizontal-light.svg" width="600">
+  </picture>
+</p>
 
 ReShade LUT Baker is a ReShade add-on that bakes the color grading of the techniques you select into a 3D LUT. Set up your grading in ReShade, pick the techniques, and export a single LUT file that reproduces them.
 
@@ -137,3 +143,5 @@ See [BUILDING.md](BUILDING.md) for build commands, tests and the offline validat
 ## License
 
 ReShade LUT Baker is available under the [MIT License](LICENSE), which also includes the notices for the ReShade add-on SDK headers and Dear ImGui.
+
+The ReShade LUT Baker name and logo are not covered by the MIT License. You may use them to refer or link to this project, but not to present a modified version as the original or to suggest that it is endorsed by the author.

@@ -37,6 +37,7 @@ jobs:
             build/Release/ReShadeLUTBaker.addon64
             README.md
             LICENSE
+            docs/images/
           if-no-files-found: error
 
       - name: Upload synthetic CUBE PNG and Rise validation fixtures

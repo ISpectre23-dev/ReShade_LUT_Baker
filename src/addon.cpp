@@ -1647,6 +1647,68 @@ void status_dot(const ImVec4 &color, const char *tooltip = nullptr)
         ImGui::SetItemTooltip("%s", tooltip);
 }
 
+// Project mark: a hexagonal cube with a glowing triangular cut. It is drawn from plain polygons, so it needs
+// no texture and stays sharp at any UI scale. The geometry follows docs/images/mark.svg, a 200 unit tall
+// hexagon centered on the origin.
+ImVec2 mark_size(const float height)
+{
+    return ImVec2(height * 0.866f, height);
+}
+
+void draw_mark(ImDrawList *draw_list, const ImVec2 &top_left, const float height)
+{
+    const float scale = height / 200.0f;
+    const ImVec2 center(top_left.x + 86.6f * scale, top_left.y + 100.0f * scale);
+    const auto point = [&](const float x, const float y) { return ImVec2(center.x + x * scale, center.y + y * scale); };
+    // GetColorU32 also applies the style alpha, so the mark fades together with disabled items.
+    const auto color = [](const std::uint32_t rgb) {
+        return ImGui::GetColorU32(ImVec4(
+            static_cast<float>((rgb >> 16) & 0xFF) / 255.0f, static_cast<float>((rgb >> 8) & 0xFF) / 255.0f,
+            static_cast<float>(rgb & 0xFF) / 255.0f, 1.0f));
+    };
+
+    // The full hexagon goes first so the antialiased faces leave no seams between them.
+    const ImVec2 hexagon[] = { point(0.0f, -100.0f), point(86.6f, -50.0f), point(86.6f, 50.0f), point(0.0f, 100.0f), point(-86.6f, 50.0f), point(-86.6f, -50.0f) };
+    const ImVec2 top_face[] = { point(0.0f, -100.0f), point(86.6f, -50.0f), point(50.23f, -29.0f), point(-50.23f, -29.0f), point(-86.6f, -50.0f) };
+    const ImVec2 left_face[] = { point(-86.6f, -50.0f), point(-50.23f, -29.0f), point(0.0f, 58.0f), point(0.0f, 100.0f), point(-86.6f, 50.0f) };
+    const ImVec2 right_face[] = { point(86.6f, -50.0f), point(86.6f, 50.0f), point(0.0f, 100.0f), point(0.0f, 58.0f), point(50.23f, -29.0f) };
+    draw_list->AddConvexPolyFilled(hexagon, static_cast<int>(std::size(hexagon)), color(0x0E0E11));
+    draw_list->AddConvexPolyFilled(top_face, static_cast<int>(std::size(top_face)), color(0x34343C));
+    draw_list->AddConvexPolyFilled(left_face, static_cast<int>(std::size(left_face)), color(0x1A1A1F));
+    draw_list->AddConvexPolyFilled(right_face, static_cast<int>(std::size(right_face)), color(0x0F0F13));
+
+    const ImVec2 rim[] = { point(-86.6f, -50.0f), point(0.0f, -100.0f), point(86.6f, -50.0f) };
+    draw_list->AddPolyline(rim, static_cast<int>(std::size(rim)), color(0x66666F), ImDrawFlags_None, std::max(1.0f, 1.5f * scale));
+
+    // The cut is a vertical gradient. A flat antialiased triangle underneath smooths the edges of the
+    // gradient bands, which are raw primitives without antialiasing.
+    draw_list->AddTriangleFilled(point(-50.23f, -29.0f), point(50.23f, -29.0f), point(0.0f, 58.0f), color(0xFF6A1A));
+    struct gradient_stop { float offset; std::uint32_t rgb; };
+    const gradient_stop stops[] = { { 0.0f, 0xFFE7B0 }, { 0.26f, 0xFFB547 }, { 0.6f, 0xFF6A1A }, { 1.0f, 0xB8200E } };
+    const ImVec2 white_pixel = ImGui::GetFontTexUvWhitePixel();
+    for (std::size_t index = 0; index + 1 < std::size(stops); ++index)
+    {
+        const gradient_stop &upper = stops[index], &lower = stops[index + 1];
+        const float upper_half = 50.23f * (1.0f - upper.offset), lower_half = 50.23f * (1.0f - lower.offset);
+        const float upper_y = -29.0f + 87.0f * upper.offset, lower_y = -29.0f + 87.0f * lower.offset;
+        const ImU32 upper_color = color(upper.rgb), lower_color = color(lower.rgb);
+
+        draw_list->PrimReserve(6, 4);
+        const unsigned int first = draw_list->_VtxCurrentIdx;
+        draw_list->PrimWriteIdx(static_cast<ImDrawIdx>(first));
+        draw_list->PrimWriteIdx(static_cast<ImDrawIdx>(first + 1));
+        draw_list->PrimWriteIdx(static_cast<ImDrawIdx>(first + 2));
+        draw_list->PrimWriteIdx(static_cast<ImDrawIdx>(first));
+        draw_list->PrimWriteIdx(static_cast<ImDrawIdx>(first + 2));
+        draw_list->PrimWriteIdx(static_cast<ImDrawIdx>(first + 3));
+        draw_list->PrimWriteVtx(point(-upper_half, upper_y), white_pixel, upper_color);
+        draw_list->PrimWriteVtx(point(upper_half, upper_y), white_pixel, upper_color);
+        draw_list->PrimWriteVtx(point(lower_half, lower_y), white_pixel, lower_color);
+        draw_list->PrimWriteVtx(point(-lower_half, lower_y), white_pixel, lower_color);
+    }
+    draw_list->AddLine(point(-50.23f, -29.0f), point(50.23f, -29.0f), color(0xFFF6E2), std::max(1.0f, 3.0f * scale));
+}
+
 void disabled_wrapped(const char *text)
 {
     ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
@@ -1706,6 +1768,26 @@ void draw_header(const runtime_state &state)
         ImGui::TextUnformatted(source_buffer_description(state).c_str());
     else
         ImGui::TextDisabled("waiting for presentation");
+
+    // Signature at the right end of the row: version and mark. It is skipped when the row is too narrow.
+    const char *const version = "v" LUT_BAKER_VERSION_STRING;
+    const ImVec2 mark = mark_size(ImGui::GetTextLineHeight());
+    const float spacing = ImGui::GetFontSize() * 0.5f;
+    const float signature_width = ImGui::CalcTextSize(version).x + spacing + mark.x;
+    ImGui::SameLine();
+    const float available = ImGui::GetContentRegionAvail().x;
+    if (available >= signature_width)
+    {
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + available - signature_width);
+        ImGui::TextDisabled("%s", version);
+        ImGui::SameLine(0.0f, spacing);
+        draw_mark(ImGui::GetWindowDrawList(), ImGui::GetCursorScreenPos(), mark.y);
+        ImGui::Dummy(mark);
+    }
+    else
+    {
+        ImGui::NewLine();
+    }
 
     if (ImGui::CollapsingHeader("How it works and limitations"))
     {

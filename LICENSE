@@ -1,6 +1,14 @@
 MIT License
 
+ReShade LUT Baker
 Copyright (c) 2026 ISpectre23
+
+ReShade add-on SDK headers (used under the MIT license option)
+Copyright (C) 2021 Patrick Mours
+Copyright (C) 2014-2026 Omar Cornut
+
+Dear ImGui
+Copyright (c) 2014-2025 Omar Cornut
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

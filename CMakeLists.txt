@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.23)
 
-project(ReShadeLUTBaker VERSION 1.1.0 LANGUAGES C CXX)
+project(ReShadeLUTBaker VERSION 1.1.0 LANGUAGES CXX)
 
 if(NOT WIN32)
   message(FATAL_ERROR "ReShade LUT Baker builds as a Windows ReShade add-on.")
@@ -24,33 +24,6 @@ set(RESHADE_SDK_COMMIT "18deaa52de0c425a78b329e9cb3c497281cd00ec" CACHE STRING "
 set(RESHADE_IMGUI_COMMIT "3912b3d9a9c1b3f17431aebafd86d2f40ee6e59c" CACHE STRING "Pinned ReShade Dear ImGui commit")
 
 include(FetchContent)
-
-# CPU-only GDeflate codec. Fetch only its libdeflate submodule, not vcpkg,
-# DirectStorage demos or GPU decompression shaders. No runtime DLL is needed.
-set(GDEFLATE_ROOT "" CACHE PATH "Path to a DirectStorage checkout with the GDeflate libdeflate submodule")
-set(GDEFLATE_COMMIT "c53f1499d5f67a61b69a1a348d22dcd2b4cb4ede" CACHE STRING "Pinned Microsoft GDeflate revision")
-if(NOT GDEFLATE_ROOT)
-  FetchContent_Declare(
-    gdeflate_codec
-    GIT_REPOSITORY https://github.com/microsoft/DirectStorage.git
-    GIT_TAG ${GDEFLATE_COMMIT}
-    GIT_SHALLOW FALSE
-    GIT_SUBMODULES "GDeflate/3rdparty/libdeflate"
-    GIT_SUBMODULES_RECURSE FALSE
-    SOURCE_SUBDIR "GDeflate/GDeflate"
-  )
-  FetchContent_MakeAvailable(gdeflate_codec)
-  set(GDEFLATE_ROOT "${gdeflate_codec_SOURCE_DIR}")
-else()
-  add_subdirectory("${GDEFLATE_ROOT}/GDeflate/GDeflate" "${CMAKE_BINARY_DIR}/gdeflate_codec")
-endif()
-if(NOT EXISTS "${GDEFLATE_ROOT}/GDeflate/3rdparty/libdeflate/libdeflate.h")
-  message(FATAL_ERROR "Initialize the GDeflate/3rdparty/libdeflate submodule in GDEFLATE_ROOT")
-endif()
-file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/$<CONFIG>/licenses/GDeflate.txt"
-  INPUT "${GDEFLATE_ROOT}/GDeflate/GDeflate/LICENSE")
-file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/$<CONFIG>/licenses/libdeflate.txt"
-  INPUT "${GDEFLATE_ROOT}/GDeflate/3rdparty/libdeflate/COPYING")
 
 if(NOT RESHADE_SDK_ROOT)
   FetchContent_Declare(
@@ -110,14 +83,11 @@ add_library(reshade_lut_core STATIC
   src/runtime_settings.hpp
   src/technique_catalog.hpp
   src/technique_preparation.hpp
-  src/wilds_tex.cpp
-  src/wilds_tex.hpp
 )
 target_compile_features(reshade_lut_core PUBLIC cxx_std_17)
 target_include_directories(reshade_lut_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_definitions(reshade_lut_core PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_include_directories(reshade_lut_core PRIVATE "${GDEFLATE_ROOT}/GDeflate/3rdparty/libdeflate")
-target_link_libraries(reshade_lut_core PUBLIC windowscodecs ole32 PRIVATE GDeflate)
+target_link_libraries(reshade_lut_core PUBLIC windowscodecs ole32)
 
 add_library(ReShadeLUTBaker SHARED
   src/addon.cpp
@@ -174,13 +144,7 @@ if(BUILD_TESTING)
   endif()
   add_test(NAME rise_tex_tests COMMAND rise_tex_tests)
 
-  add_executable(wilds_tex_validate tools/wilds_tex_validate.cpp)
-  target_link_libraries(wilds_tex_validate PRIVATE reshade_lut_core)
-  if(MSVC)
-    target_compile_options(wilds_tex_validate PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
-  endif()
-
-  foreach(test_name IN ITEMS export_formats_tests png_lut_tests technique_preparation_tests runtime_settings_tests wilds_tex_tests)
+  foreach(test_name IN ITEMS export_formats_tests png_lut_tests technique_preparation_tests runtime_settings_tests)
     add_executable(${test_name} "tests/${test_name}.cpp")
     target_link_libraries(${test_name} PRIVATE reshade_lut_core)
     target_compile_definitions(${test_name} PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -198,7 +162,7 @@ if(BUILD_TESTING)
     )
     add_test(
       NAME writer_fixture_reference
-      COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_writer_fixtures.py" "$<TARGET_FILE:rise_tex_fixtures>" "$<TARGET_FILE:wilds_tex_validate>"
+      COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_writer_fixtures.py" "$<TARGET_FILE:rise_tex_fixtures>"
     )
   endif()
 endif()

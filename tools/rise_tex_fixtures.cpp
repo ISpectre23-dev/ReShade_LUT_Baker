@@ -2,7 +2,6 @@
 // import/conversion utility or product preset. No game assets are required.
 #include "rise_tex.hpp"
 #include "png_lut.hpp"
-#include "wilds_tex.hpp"
 #include "version.hpp"
 
 #include <filesystem>
@@ -45,18 +44,6 @@ int main(const int argc, char **argv)
                 }
                 std::cout << std::setprecision(12) << "Identity32 quantization max/mean/RMS: " << metrics.quantization.maximum_absolute
                           << " / " << metrics.quantization.mean_absolute << " / " << metrics.quantization.rms << '\n';
-            }
-            if (size == 33)
-            {
-                lut_baker::quantization_metrics wilds_metrics;
-                if (!lut_baker::write_wilds_tex_atomic(directory / "Identity33.tex.241106027", size, samples, wilds_metrics, error))
-                {
-                    std::cerr << error << '\n';
-                    return 1;
-                }
-                std::cout << std::setprecision(12) << "Identity33 Wilds FP16 rounding max/mean/RMS: "
-                          << wilds_metrics.quantization.maximum_absolute << " / " << wilds_metrics.quantization.mean_absolute
-                          << " / " << wilds_metrics.quantization.rms << '\n';
             }
         }
         const auto layout = lut_baker::choose_lattice_layout(32);
@@ -104,26 +91,6 @@ int main(const int argc, char **argv)
                 }
             }
         }
-        const auto wilds_layout = lut_baker::choose_lattice_layout(33);
-        auto asymmetric33 = lut_baker::make_identity_lattice(33, wilds_layout.first, wilds_layout.second);
-        for (std::uint32_t b = 0; b < 33; ++b)
-            for (std::uint32_t g = 0; g < 33; ++g)
-                for (std::uint32_t r = 0; r < 33; ++r)
-                    asymmetric33[(b * 33 + g) * 33 + r] = {
-                        static_cast<float>(-0.125 + 1.5 * (b / 32.0)),
-                        static_cast<float>(0.1 + 0.8 * (r / 32.0) * (r / 32.0)),
-                        static_cast<float>(0.025 + 0.9 * (g / 32.0)), 1.0f
-                    };
-        metadata.title = "Wilds asymmetric axes fixture";
-        metadata.techniques = { "Offline F(r,g,b) = (-0.125+1.5*b, 0.1+0.8*r*r, 0.025+0.9*g)" };
-        if (!lut_baker::write_wilds_tex_atomic(directory / "Asymmetric33.tex.241106027", 33, asymmetric33, metrics, error) ||
-            !lut_baker::write_cube_atomic(directory / "Asymmetric33.cube", 33, asymmetric33, metadata, false, error))
-        {
-            std::cerr << error << '\n';
-            return 1;
-        }
-        std::cout << std::setprecision(12) << "Asymmetric33 Wilds FP16 rounding max/mean/RMS: " << metrics.quantization.maximum_absolute
-                  << " / " << metrics.quantization.mean_absolute << " / " << metrics.quantization.rms << '\n';
         auto asymmetric64 = lut_baker::make_identity_lattice(64, 512, 512);
         for (std::uint32_t b = 0; b < 64; ++b)
             for (std::uint32_t g = 0; g < 64; ++g)

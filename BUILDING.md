@@ -18,19 +18,18 @@ cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-The add-on is written to `build/Release/ReShadeLUTBaker.addon64`. The license texts of the bundled libraries are copied to `build/Release/licenses/`; keep that folder and `THIRD_PARTY_NOTICES.md` in release packages.
+The add-on is written to `build/Release/ReShadeLUTBaker.addon64`. Include the repository's `LICENSE` file in release packages; it also contains the dependency notices.
 
 A Windows GitHub Actions workflow runs the same build and tests.
 
 ## Dependencies
 
-CMake fetches three pinned dependencies from their official repositories:
+CMake fetches two pinned dependencies from their official repositories:
 
 | Dependency | Version | Used for |
 | --- | --- | --- |
 | ReShade | 6.8.0, commit `18deaa52de0c425a78b329e9cb3c497281cd00ec` | Add-on API headers |
 | Dear ImGui | commit `3912b3d9a9c1b3f17431aebafd86d2f40ee6e59c` | Panel UI, the revision ReShade 6.8.0 uses |
-| Microsoft DirectStorage | commit `c53f1499d5f67a61b69a1a348d22dcd2b4cb4ede`, with its libdeflate submodule at `8ba9502fb30d2bf728592d121f0d402e40c8cb05` | GDeflate compression for Wilds, linked statically |
 
 PNG encoding uses the encoder included with Windows, so it needs no extra library.
 
@@ -39,11 +38,8 @@ To build without fetching, point CMake at existing checkouts:
 ```powershell
 cmake -S . -B build -A x64 `
   -DRESHADE_SDK_ROOT="C:\src\reshade" `
-  -DIMGUI_ROOT="C:\src\imgui" `
-  -DGDEFLATE_ROOT="C:\src\DirectStorage"
+  -DIMGUI_ROOT="C:\src\imgui"
 ```
-
-In the DirectStorage checkout, run `git submodule update --init GDeflate/3rdparty/libdeflate` first.
 
 ## Tests
 
@@ -64,7 +60,6 @@ The tools in `tools/` check exported files offline. They compare values at the L
 | `validate_cube.py` | `inspect`, `identity`, `compare` |
 | `validate_png.py` | `inspect`, `identity`, `compare-cube`; needs `--layout horizontal` or `--layout square` |
 | `validate_rise_tex.py` | `inspect`, `identity`, `compare-cube` |
-| `validate_wilds_tex.py` | `inspect`, `identity`, `compare-cube` |
 
 `identity` measures an identity export against the ideal values. `compare` and `compare-cube` compare an export against a CUBE of the same size.
 
@@ -73,12 +68,9 @@ python tools/validate_cube.py identity Identity.cube --tolerance 1e-6
 python tools/validate_cube.py compare reference.cube candidate.cube --tolerance 1e-6
 python tools/validate_png.py compare-cube MyGrade.png MyGrade.cube --layout horizontal
 python tools/validate_rise_tex.py compare-cube MyGrade.tex.28 MyGrade.cube
-python tools/validate_wilds_tex.py compare-cube MyGrade.tex.241106027 MyGrade33.cube
 ```
 
 For PNG and Rise, add `--clamp` to `compare-cube` only when the file was exported with **Clamp to 0-1**.
-
-The Wilds tool decompresses files with `build/Release/wilds_tex_validate.exe`; use `--decoder` if it is somewhere else. To check against Microsoft's own codec instead, pass `--codec` with the path to a `dstorage.dll` you trust, with `dstoragecore.dll` in the same folder.
 
 ### Test fixtures
 
@@ -101,4 +93,4 @@ Use an empty folder with about 150 MiB free. Existing files are never overwritte
 7. Bake a technique that was never enabled, with unsaved parameter changes. Parameters, states and order must be restored, and the preset file must not change.
 8. Cancel during shader compilation. No file may be written and the bake must not restart on its own.
 9. In Performance mode, a technique bake must be rejected and an identity export must still work.
-10. Load the exports where they will be used (`CubeLUT3D.fx` for CUBE, `LUT.fx` for PNG, in-game for Rise and Wilds) and compare them with the original grading, in SDR and in HDR.
+10. Load the exports where they will be used (`CubeLUT3D.fx` for CUBE, `LUT.fx` for PNG, in-game for Rise) and compare them with the original grading, in SDR and in HDR.

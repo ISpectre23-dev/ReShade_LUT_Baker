@@ -1,12 +1,14 @@
 # ReShade LUT Baker
 
-ReShade LUT Baker is a ReShade add-on that bakes the color grading of the techniques you select into a 3D LUT. It exports standard `.cube` and PNG files, plus native LUTs for Monster Hunter Rise and Monster Hunter Wilds (experimental).
+ReShade LUT Baker is a ReShade add-on that bakes the color grading of the techniques you select into a 3D LUT. Set up your grading in ReShade, pick the techniques, and export a single LUT file that reproduces them.
 
-The bake runs the techniques on a neutral color grid in floating point, in ReShade's real execution order. No screenshots are involved, and your preset is never saved or changed.
+It exports standard `.cube` and PNG files, plus native LUTs for Monster Hunter Rise.
+
+The bake runs the techniques on a neutral color grid in floating point, in ReShade's real execution order. It replaces the usual manual workflow (neutral LUT, screenshot, external converter) and its 8-bit limit with a direct floating-point export. Your preset is never saved or changed.
 
 ## Features
 
-- Exports CUBE, PNG, Monster Hunter Rise (`.tex.28`) and Monster Hunter Wilds (`.tex.241106027`) LUTs.
+- Exports CUBE, PNG and Monster Hunter Rise (`.tex.28`) LUTs.
 - Bakes several techniques together, in the order ReShade runs them.
 - Bakes disabled techniques too, without leaving them enabled.
 - Keeps unsaved shader parameters, technique states and order intact during the bake.
@@ -69,7 +71,6 @@ Files are written to `\LUT_Bakes` inside ReShade's base folder. If the name alre
 | CUBE (`.cube`) | 16³, 32³, 64³ (default), 128³ or custom from 2 to 128 | Float | Kept |
 | PNG (`.png`) | 16³, 32³, 64³ or 128³ | 8-bit (default) or 16-bit | Rejected, or clamped with **Clamp to 0-1** |
 | Monster Hunter Rise (`.tex.28`) | 32³, fixed | 8-bit | Rejected, or clamped with **Clamp to 0-1** |
-| Monster Hunter Wilds (`.tex.241106027`), experimental | 33³, fixed | 16-bit float | Kept, within ±65504 |
 
 The size is the number of points per color axis. 64³ is a good default; 128³ has eight times as many samples and is rarely needed.
 
@@ -118,13 +119,8 @@ Besides CUBE and PNG, the add-on writes the native LUT format of these games:
 | Game | Format | Status | Reference |
 | --- | --- | --- | --- |
 | Monster Hunter Rise | `.tex.28` | Supported | [RISE_TEX28.md](docs/RISE_TEX28.md) |
-| Monster Hunter Wilds | `.tex.241106027` | Experimental | [WILDS_TEX241106027.md](docs/WILDS_TEX241106027.md) |
 
 The add-on only writes the file. It does not install it or modify the game, so use a LUT manager or mod loader to load it.
-
-### Monster Hunter Wilds
-
-Support is experimental. In-game results are not reliable yet. Wilds grades in a logarithmic color domain and the export does not convert to it, so the in-game look may differ from your ReShade grading.
 
 ## Limitations
 
@@ -140,4 +136,4 @@ See [BUILDING.md](BUILDING.md) for build commands, tests and the offline validat
 
 ## License
 
-ReShade LUT Baker is available under the [MIT License](LICENSE). The bundled compression libraries keep their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+ReShade LUT Baker is available under the [MIT License](LICENSE), which also includes the notices for the ReShade add-on SDK headers and Dear ImGui.

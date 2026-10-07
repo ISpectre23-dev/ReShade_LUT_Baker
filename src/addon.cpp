@@ -5,7 +5,6 @@
 #include "cube_lut.hpp"
 #include "png_lut.hpp"
 #include "rise_tex.hpp"
-#include "wilds_tex.hpp"
 #include "runtime_settings.hpp"
 #include "technique_catalog.hpp"
 #include "technique_preparation.hpp"
@@ -952,9 +951,6 @@ export_result execute_export_job(export_job job) noexcept
         case lut_baker::output_format::rise_tex:
             written = lut_baker::write_rise_tex_atomic(result.output, job.request.lattice_size, job.samples, job.request.range, result.quantized_metrics, error);
             break;
-        case lut_baker::output_format::wilds_tex:
-            written = lut_baker::write_wilds_tex_atomic(result.output, job.request.lattice_size, job.samples, result.quantized_metrics, error);
-            break;
         case lut_baker::output_format::png:
             written = lut_baker::write_png_lut_atomic(result.output, job.request.lattice_size, job.samples,
                 job.request.png_distribution, job.request.range, job.metadata, result.quantized_metrics, error, job.request.png_depth);
@@ -1123,8 +1119,6 @@ bool poll_export_writer(runtime_state &state)
                 << metrics.quantization.mean_absolute << "/" << metrics.quantization.rms;
         if (result.format == lut_baker::output_format::png)
             message << "; " << static_cast<unsigned int>(result.png_depth) << " bits per channel";
-        else if (result.format == lut_baker::output_format::wilds_tex)
-            message << "; 16-bit floating-point channels; lossless GDeflate compression; no color-domain conversion";
         log_message(reshade::log::level::info, message.str());
         for (std::size_t index = 0; index < result.verified_techniques.size(); ++index)
             log_message(reshade::log::level::info, std::string(lut_baker::output_format_name(result.format)) + " technique " + std::to_string(index + 1) + ": " + result.verified_techniques[index]);
@@ -1859,7 +1853,6 @@ const output_format_option format_options[] = {
     { lut_baker::output_format::cube, "CUBE", "CUBE", ".cube", false, "A 3D lookup table (.cube). Float values are preserved, including values outside 0-1. Choose 16, 32, 64, 128 or a custom size from 2 to 128." },
     { lut_baker::output_format::png, "PNG", "PNG", ".png", false, "A 3D lookup table stored in a PNG image. Choose 8 or 16 bits per channel, with values in 0-1. Choose Horizontal strip or Square tiles. The reader must support the layout and bit depth." },
     { lut_baker::output_format::rise_tex, "Monster Hunter Rise", "Rise TEX", ".tex.28", true, "Native Monster Hunter Rise LUT (TEX v28). Fixed 32x32x32, 8 bits per channel; values limited to 0-1." },
-    { lut_baker::output_format::wilds_tex, "Monster Hunter Wilds (experimental)", "Wilds TEX", ".tex.241106027", true, "Experimental. Native Monster Hunter Wilds LUT (TEX v241106027). Fixed 33x33x33, 16-bit float per channel. Values are not converted to the game's logarithmic color domain." },
 };
 
 const output_format_option &find_format_option(const lut_baker::output_format format)
@@ -1918,7 +1911,6 @@ void draw_output_settings(runtime_state &state)
         ImGui::SetItemTooltip("File format of the exported LUT. Hover a format in the list for its details.");
 
     const bool is_png = state.preferences.format == lut_baker::output_format::png;
-    const bool is_wilds = state.preferences.format == lut_baker::output_format::wilds_tex;
     if (is_png)
     {
         field_label("Layout");
@@ -2020,12 +2012,10 @@ void draw_output_settings(runtime_state &state)
     else
     {
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted(is_wilds ? u8"33\u00B3, 16-bit float" : u8"32\u00B3, 8-bit");
+        ImGui::TextUnformatted(u8"32\u00B3, 8-bit");
         ImGui::SameLine();
         ImGui::TextDisabled("(fixed)");
-        ImGui::SetItemTooltip(is_wilds
-            ? "Wilds exports use a fixed 33x33x33 RGBA16F profile (16-bit float per channel)."
-            : "Monster Hunter Rise LUTs are always 32x32x32 with 8 bits per RGB channel.");
+        ImGui::SetItemTooltip("Monster Hunter Rise LUTs are always 32x32x32 with 8 bits per RGB channel.");
 
     }
     if (state.preferences.format == lut_baker::output_format::rise_tex || is_png)
@@ -2041,15 +2031,6 @@ void draw_output_settings(runtime_state &state)
 
         skip_field_label();
         disabled_wrapped(is_png ? "Use a PNG-compatible reader with matching layout, size and bit depth." : "Verify the result in-game.");
-    }
-    if (is_wilds)
-    {
-        skip_field_label();
-        disabled_wrapped("RGB values from -65504 to 65504 are kept, rounded to 16-bit float. No clamping or gamma conversion is applied.");
-        skip_field_label();
-        ImGui::PushStyleColor(ImGuiCol_Text, color_warning);
-        ImGui::TextWrapped("Experimental: in-game results are not reliable yet. Wilds grades in a logarithmic color domain and this export does not convert to it, so the in-game look may differ from your ReShade grading.");
-        ImGui::PopStyleColor();
     }
 
     std::string settings_error;
@@ -2244,9 +2225,8 @@ void draw_result(runtime_state &state)
                     const auto &metrics = state.quantized_metrics;
                     metric_row("Source RGB range", "[%.9g, %.9g]", metrics.source_minimum, metrics.source_maximum);
                     metric_row("Clipped values / samples", "%zu / %zu", metrics.clipped_components, metrics.clipped_samples);
-                    const bool wilds = state.last_format == lut_baker::output_format::wilds_tex;
-                    const unsigned int bits = wilds ? 16u : state.last_format == lut_baker::output_format::png ? static_cast<unsigned int>(state.last_png_depth) : 8u;
-                    const std::string label = std::to_string(bits) + (wilds ? "-bit float rounding error (max / mean / RMS)" : "-bit quantization error (max / mean / RMS)");
+                    const unsigned int bits = state.last_format == lut_baker::output_format::png ? static_cast<unsigned int>(state.last_png_depth) : 8u;
+                    const std::string label = std::to_string(bits) + "-bit quantization error (max / mean / RMS)";
                     metric_row(label.c_str(),"%.9g / %.9g / %.9g",
                         metrics.quantization.maximum_absolute, metrics.quantization.mean_absolute, metrics.quantization.rms);
                 }

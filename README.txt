@@ -123,4 +123,4 @@ License and documentation
 -------------------------
 See LICENSE for the MIT terms, third-party notices and name/logo policy.
 The full documentation is available at:
-https://github.com/ISpectre23/ReShade_LUT_Baker
+https://github.com/ISpectre23/ReShade-LUT-Baker

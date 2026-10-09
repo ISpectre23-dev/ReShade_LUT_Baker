@@ -1,4 +1,4 @@
-"""Independent PNG parser/layout regressions; no auxiliary grading shader."""
+"""Independent PNG parser and layout regressions."""
 
 import contextlib
 import io
@@ -101,7 +101,7 @@ class PngTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             path = pathlib.Path(temporary) / "identity16.png"
             width, height, data = identity_rgb(2, bit_depth=16)
-            # An error that fits the old 8-bit tolerance must fail at 16 bits.
+            # A 16-bit comparison must reject errors tolerated at 8 bits.
             path.write_bytes(png_bytes(width, height, b"\x00\x14" + data[2:], bit_depth=16))
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(main(["identity", str(path), "--layout", "horizontal"]), 1)

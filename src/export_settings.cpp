@@ -90,8 +90,8 @@ bool validate_output_filename(const std::string_view value, std::string &normali
         error = "The file name must end in " + suffix + " (lowercase), or have no extension so it is added automatically.";
         return false;
     }
-    // A known suffix left inside a compound filename is almost certainly a
-    // format-switch mistake, not a meaningful Rise basename.
+    // Reject embedded export suffixes so switching formats cannot produce
+    // compound names such as .cube.tex.28.
     if (format == output_format::rise_tex && ends_with(normalized.substr(0, normalized.size() - suffix.size()), ".cube"))
     {
         error = "Use a Rise basename without the .cube extension.";
@@ -167,8 +167,10 @@ std::filesystem::path make_unique_output_path(const std::filesystem::path &direc
 std::string filename_for_format(const std::string_view filename, const output_format previous, const output_format next)
 {
     const std::string suffix = output_extension(previous);
+    // Without the previous suffix there is nothing to swap. Return the name
+    // unchanged so validation can report it if it is invalid.
     if (!ends_with(filename, suffix))
-        return std::string(filename); // Empty/bare names stay bare; invalid input stays visible.
+        return std::string(filename);
     return std::string(filename.substr(0, filename.size() - suffix.size())) + output_extension(next);
 }
 

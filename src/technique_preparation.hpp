@@ -14,8 +14,8 @@ enum class technique_preparation
 // A disabled, never-initialized effect must finish that creation before an
 // offscreen permutation is requested. Enabling queues it; disabling immediately
 // retains the queue without rendering a frame or saving the preset.
-// The caller supplies a fresh authoritative handle and checks catalog availability
-// because enumeration is empty while ReShade's creation queue is still pending.
+// Use a handle from the current catalog and check whether enumeration is
+// available; it is empty while ReShade's resource-creation queue is pending.
 template <typename GetState, typename SetState, typename CatalogAvailable>
 [[nodiscard]] technique_preparation prepare_default_technique(
     GetState get_state, SetState set_state, CatalogAvailable catalog_available)
@@ -23,9 +23,8 @@ template <typename GetState, typename SetState, typename CatalogAvailable>
     if (get_state())
         return technique_preparation::ready;
 
-    // Also restore if a diagnostic/probe throws after enabling. ReShade's API
-    // normally does not throw; an external veto is reported, never treated as
-    // successful preparation. No state is retained across frames by this guard.
+    // Restore the disabled state if a getter or setter throws after enabling.
+    // Read the state back below to detect changes rejected by another add-on.
     struct restore_disabled
     {
         SetState &setter;

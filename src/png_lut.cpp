@@ -73,9 +73,9 @@ bool remove_color_metadata(std::vector<std::uint8_t> &bytes, std::string &error)
                 return invalid();
             end = true;
         }
-        // WIC reinserts sRGB/gAMA at commit even after metadata API removal.
-        // Omit only complete color-description blocks. Compressed image data,
-        // Software text, and every retained chunk's checksum stay byte-for-byte intact.
+        // WIC can add color metadata at commit even when none was requested.
+        // Drop those chunks whole. The pixel data, the Software text chunk and
+        // the checksums of every chunk that stays are left untouched.
         if (type != "sRGB" && type != "gAMA" && type != "iCCP" && type != "cHRM" &&
             type != "cICP" && type != "mDCV" && type != "cLLI")
             untagged.insert(untagged.end(), bytes.begin() + offset, bytes.begin() + offset + total);
@@ -204,7 +204,8 @@ bool encode_png(const png_rgb_image &image, const std::string &software, std::ve
         return false;
     }
     com_apartment apartment;
-    // An existing apartment is usable; do not uninitialize somebody else's COM state.
+    // Reuse the thread's existing COM apartment if its mode differs. The guard
+    // must call CoUninitialize only when our CoInitializeEx call succeeded.
     if (apartment.result != RPC_E_CHANGED_MODE && encoding_failure(apartment.result, "initializing the encoder", error))
         return false;
     using Microsoft::WRL::ComPtr;
@@ -237,7 +238,9 @@ bool encode_png(const png_rgb_image &image, const std::string &software, std::ve
     if (encoding_failure(frame->SetPixelFormat(&pixel_format), "setting RGB bit depth", error) ||
         encoding_failure(IsEqualGUID(pixel_format, requested_format) ? S_OK : E_FAIL, "verifying the RGB bit depth", error))
         return false;
-    // No pixel converter or SetColorContexts. Remove default color tags after commit.
+    // Skip the pixel converter and SetColorContexts so the samples are written
+    // as they are. WIC still adds default color tags; those are removed after
+    // commit.
     if (!software.empty())
     {
         ComPtr<IWICMetadataQueryWriter> metadata;

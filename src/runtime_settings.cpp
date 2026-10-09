@@ -9,6 +9,7 @@ namespace
 {
 std::string identity(const std::string &effect, const std::string &name)
 {
+    // Use a NUL separator so different effect/name pairs cannot share a key.
     return effect + '\0' + name;
 }
 std::string label(const std::string &effect, const std::string &name)
@@ -100,6 +101,8 @@ bool plan_settings_restore(const runtime_settings &saved, const runtime_settings
             error = "A shader parameter disappeared or changed type/dimensions: " + label(uniform.effect, uniform.name) + ". Old values will not be assigned to a different parameter.";
             return false;
         }
+        // Compare raw words so signed zero and NaN payloads are preserved.
+        // A float comparison would also treat identical NaNs as different.
         if (uniform.words != current.uniforms[found->second].words)
             plan.uniforms.emplace_back(index, found->second);
     }

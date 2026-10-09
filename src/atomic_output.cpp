@@ -53,8 +53,8 @@ bool write_file_atomic(const std::filesystem::path &destination, const bool over
     }
 
     owned_temporary temporary;
-    // CREATE_NEW reserves only our own temporary. Stale files from an earlier
-    // process (including PID reuse) must never be truncated or deleted.
+    // CREATE_NEW reserves a new temporary file. Leave existing files alone,
+    // even if an earlier process used the same process ID.
     for (int attempt = 0; attempt < 100; ++attempt)
     {
         std::wostringstream suffix;
@@ -80,7 +80,8 @@ bool write_file_atomic(const std::filesystem::path &destination, const bool over
         return false;
     }
 
-    // Destroy/close stream before the cleanup guard, including on exceptions.
+    // Declare the stream after the guard so it closes before cleanup, even if
+    // serialization throws.
     std::ofstream stream(temporary.path, std::ios::binary | std::ios::trunc);
     if (!stream)
     {
@@ -102,6 +103,8 @@ bool write_file_atomic(const std::filesystem::path &destination, const bool over
         return false;
     }
 
+    // A same-directory rename publishes the complete file. Without replacement,
+    // it also rejects destinations created after the initial existence check.
     const DWORD flags = MOVEFILE_WRITE_THROUGH | (overwrite ? MOVEFILE_REPLACE_EXISTING : 0u);
     if (!MoveFileExW(temporary.path.c_str(), destination.c_str(), flags))
     {

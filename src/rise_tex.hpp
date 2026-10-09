@@ -11,9 +11,9 @@ inline constexpr std::uint32_t rise_lut_size = 32;
 inline constexpr std::size_t rise_sample_count = 32u * 32u * 32u;
 inline constexpr std::size_t rise_file_size = 56u + rise_sample_count * 4u;
 
-// Verified Rise ColorCubeLinear / Color Boost profile supplied with the format
-// investigation. Control fields are preserved verbatim; this is NOT a generic
-// RE Engine TEX serializer. Byte layout avoids struct padding/endian ambiguity.
+// Fixed Rise ColorCubeLinear / Color Boost header, not a generic TEX serializer.
+// Explicit bytes preserve control fields and avoid struct padding and endian
+// ambiguity.
 inline constexpr std::array<std::uint8_t, 56> rise_tex_header {{
     0x54, 0x45, 0x58, 0x00, 0x1c, 0x00, 0x00, 0x00, 0x20, 0x00, 0x20, 0x00, 0x20, 0x00, 0x01, 0x10,
     0x1d, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00,

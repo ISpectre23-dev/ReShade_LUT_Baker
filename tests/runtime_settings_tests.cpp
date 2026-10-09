@@ -47,7 +47,6 @@ lut_baker::runtime_settings live_settings()
 }
 
 // Models load_current_preset resetting the whole runtime after compilation.
-// This is a settings API model, not a synthetic grading shader or GPU test.
 struct runtime_model
 {
     lut_baker::runtime_settings live = live_settings();

@@ -7,11 +7,9 @@
 
 namespace lut_baker
 {
-// ReShade's render_technique can enqueue compilation but does not return its
-// outcome. A missing render event is NOT a reason to call it every frame: a
-// failed permutation can be enqueued again and again, disturbing gameplay
-// effects too. Wait for reshade_reloaded_effects, then verify once per key.
-// This policy contains no ReShade/GPU calls and is exercised with a fake clock.
+// render_technique can queue compilation without reporting its result. Wait for
+// a newer reload generation before retrying a missing render event, and allow
+// only one compilation wait per exact key to prevent repeated compilation loops.
 class bake_control
 {
 public:
@@ -43,8 +41,7 @@ public:
 
     void begin_attempt() noexcept { waiting_ = false; }
 
-    // Returns false if this same exact technique still did not render after
-    // its compilation cycle completed. Never guess from an effect name alone.
+    // Keep the retry limit for each key even after an effect reload.
     [[nodiscard]] bool wait_for_compilation(const technique_key &key, const std::uint64_t reload_generation)
     {
         if (!active_ || selection_contains_exact(attempted_missing_, key))
@@ -86,8 +83,8 @@ private:
     technique_selection attempted_missing_;
 };
 
-// Cancellation only precedes file serialization. Submitted GPU work must still
-// drain through its fence; stopping the request never makes its resources idle.
+// Allow cancellation only before file writing starts. Even after cancellation,
+// submitted GPU work must finish before its resources can be reused or released.
 [[nodiscard]] inline bool can_abort_export(const bool export_pending, const bool writer_pending) noexcept
 {
     return export_pending && !writer_pending;

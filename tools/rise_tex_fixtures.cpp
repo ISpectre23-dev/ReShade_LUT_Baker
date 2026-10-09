@@ -1,5 +1,4 @@
-// Offline validation fixtures for the actual writers; not a grading shader,
-// import/conversion utility or product preset. No game assets are required.
+// Generate synthetic LUT samples for independent checks of the production writers.
 #include "rise_tex.hpp"
 #include "png_lut.hpp"
 #include "version.hpp"
@@ -22,7 +21,7 @@ int main(const int argc, char **argv)
         lut_baker::cube_metadata metadata;
         metadata.exporter_version = LUT_BAKER_VERSION_STRING;
         metadata.reshade_api = "Offline writer fixture (no GPU)";
-        metadata.warnings = { "Synthetic validation fixture, not a tested in-game grading preset." };
+        metadata.warnings = { "Synthetic writer fixture, not a grading preset." };
         std::string error;
         for (const std::uint32_t size : { 2u, 16u, 32u, 33u, 64u, 65u, 128u })
         {
@@ -120,7 +119,7 @@ int main(const int argc, char **argv)
                 }
             }
         }
-        std::cout << "Fixtures written to " << directory.u8string() << ". In-game loading remains untested.\n";
+        std::cout << "Fixtures written to " << directory.u8string() << ".\n";
         return 0;
     }
     catch (const std::exception &exception)

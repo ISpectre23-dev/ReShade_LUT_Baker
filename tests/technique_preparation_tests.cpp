@@ -18,11 +18,9 @@ void expect(const bool condition, const char *message)
     }
 }
 
-// Models the audited ReShade 6.8 API branches, not a shader or a GPU:
-// enable_technique queues creation of permutation zero; disable_technique
-// retains that queue; enumerate_techniques is empty until creation completes.
-// A nonzero permutation requires the constant buffer created by permutation
-// zero. The old direct-offscreen path violates precisely this precondition.
+// Model ReShade 6.8 resource creation: enabling queues permutation zero, and
+// disabling retains that queue. Enumeration is empty until creation completes.
+// Offscreen permutations require the shared constant buffer from permutation zero.
 struct runtime_model
 {
     bool enabled = false;
@@ -43,8 +41,8 @@ struct runtime_model
         state_writes.push_back(value);
         if (value && !compiled)
             return;
-        // In ReShade the before-change event is skipped while loading. Thus
-        // restoring a newly queued default cannot be vetoed by that event.
+        // ReShade skips the before-change event while loading, so restoring a
+        // newly queued default cannot be vetoed by it.
         if (!creation_pending && (value ? veto_enable : veto_disable))
             return;
         enabled = value;
@@ -90,7 +88,7 @@ int main()
     using namespace std::chrono_literals;
     const bake_control::clock::time_point start {};
 
-    // Reproduce the reported starting conditions for both exact identities.
+    // Disabled, uninitialized effects need shared resources before offscreen work.
     for (const lut_baker::technique_key key : {
         lut_baker::technique_key { "DPX.fx", "DPX" },
         lut_baker::technique_key { "FakeHDR.fx", "HDR" } })
@@ -190,7 +188,8 @@ int main()
     cancelled.start(start + 101s);
     expect(cancelled.wait_for_initialization({ "DPX.fx", "DPX" }, 41), "next export gets fresh default-stage history");
 
-    // Exact occurrences stay separate. No name-only matching or reselection.
+    // Two techniques with the same effect and name are tracked separately, so
+    // each one gets its own wait.
     bake_control duplicates;
     duplicates.start(start);
     expect(duplicates.wait_for_initialization({ "same.fx", "grade", 0, 2 }, 50), "first duplicate preparation");

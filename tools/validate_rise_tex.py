@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only validator for the verified Rise 32^3 TEX28 profile, not a converter."""
+"""Read-only validator for the fixed Rise 32^3 TEX28 profile, not a converter."""
 
 from __future__ import annotations
 
@@ -38,8 +38,8 @@ class RiseTex:
 
 def load_rise_tex(path: pathlib.Path) -> RiseTex:
     try:
-        # Read at most one byte beyond this fixed profile. Malformed huge files
-        # do not need to be loaded wholesale just to reject their length.
+        # Read one extra byte to detect oversized files without loading all of
+        # their contents into memory.
         with path.open("rb") as stream:
             data = stream.read(FILE_SIZE + 1)
     except OSError as exc:
@@ -47,7 +47,7 @@ def load_rise_tex(path: pathlib.Path) -> RiseTex:
     if len(data) != FILE_SIZE:
         raise RiseTexError(f"expected exactly {FILE_SIZE} bytes for Rise TEX28, found {len(data)} (at most one extra byte read)")
     if data[:56] != HEADER:
-        raise RiseTexError("header does not match the verified 32^3 RGBA8 sRGB Rise TEX28 profile")
+        raise RiseTexError("header does not match the fixed 32^3 RGBA8 sRGB Rise TEX28 profile")
     payload = data[56:]
     if any(payload[i] != 255 for i in range(3, len(payload), 4)):
         raise RiseTexError("Rise LUT alpha must be 255 at every node")
@@ -81,7 +81,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         tex = load_rise_tex(args.tex)
-        print("Verified Rise TEX28: 32 x 32 x 32, DXGI 29, RGBA, red-fastest, alpha 255, 131128 bytes")
+        print("Valid Rise TEX28: 32 x 32 x 32, DXGI 29, RGBA, red-fastest, alpha 255, 131128 bytes")
         if args.command == "inspect":
             return 0
         if not math.isfinite(args.tolerance) or args.tolerance < 0:
@@ -90,7 +90,7 @@ def main() -> int:
         print(f"Maximum absolute RGB error: {metrics.maximum_absolute:.12g}")
         print(f"Mean absolute RGB error: {metrics.mean_absolute:.12g}")
         print(f"RMS RGB error: {metrics.rms:.12g}")
-        print("Node metrics only: not a validation of GPU execution, interpolation, native loading or SDR/HDR equivalence.")
+        print("Metrics cover stored LUT nodes only.")
         return 0 if metrics.maximum_absolute <= args.tolerance else 1
     except (RiseTexError, CubeError) as exc:
         print(f"Validation failed: {exc}", file=sys.stderr)

@@ -9,6 +9,8 @@
 
 namespace lut_baker
 {
+// Runtime handles may change on reload. The occurrence index distinguishes
+// techniques with the same effect and name.
 struct technique_key
 {
     std::string effect;
@@ -42,6 +44,8 @@ struct catalog_reconciliation
     technique_selection selected;
 };
 
+// Equality and hashing match the occurrence index. Also check the duplicate
+// count: if it changed, the saved selection can no longer be matched safely.
 [[nodiscard]] inline bool selection_contains_exact(
     const technique_selection &selection,
     const technique_key &key)
@@ -58,7 +62,7 @@ struct catalog_reconciliation
     catalog_reconciliation result;
 
     // ReShade enumeration is temporarily empty while effects are compiling.
-    // Keep the previous catalog/selection until an authoritative result exists.
+    // Keep the previous catalog and selection until enumeration is available.
     if (refreshed_catalog.empty() && (!previous_selection.empty() || pending_request_nonempty))
         return result;
 

@@ -33,7 +33,7 @@ int main()
     control.begin_attempt();
     expect(control.wait_for_compilation(first, 7), "first missing event waits for compilation");
     expect(control.waiting() && control.waiting_key() == first, "waiting technique retained for diagnostics");
-    // Reproduces the reported thousands-of-attempts loop at high frame rates.
+    // A reload wait must block per-frame retries even at high frame rates.
     bool no_frame_retries = true;
     for (int frame = 0; frame < 10000; ++frame)
         no_frame_retries = no_frame_retries && !control.can_attempt(7);

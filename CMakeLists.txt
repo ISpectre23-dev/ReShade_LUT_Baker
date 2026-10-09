@@ -19,7 +19,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>")
 set(RESHADE_SDK_ROOT "" CACHE PATH "Path to a ReShade source checkout")
 set(IMGUI_ROOT "" CACHE PATH "Path to the Dear ImGui checkout used by ReShade")
 
-# These revisions are the ReShade 6.8.0/API 20 sources audited for this release.
+# Pin the SDK and Dear ImGui together so overlay bindings match ReShade 6.8.0.
 set(RESHADE_SDK_COMMIT "18deaa52de0c425a78b329e9cb3c497281cd00ec" CACHE STRING "Pinned ReShade 6.8.0 SDK revision")
 set(RESHADE_IMGUI_COMMIT "3912b3d9a9c1b3f17431aebafd86d2f40ee6e59c" CACHE STRING "Pinned ReShade Dear ImGui commit")
 

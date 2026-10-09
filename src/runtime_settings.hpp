@@ -14,8 +14,8 @@ namespace lut_baker
 enum class uniform_value_type { boolean, sint, uint, real, sint16, uint16, real16 };
 enum class settings_result { ready, waiting, error };
 
-// Logical components returned by the public API, not padded constant-buffer
-// storage. Floating-point words retain signed zero and NaN bit patterns.
+// Store values from the public API, without constant-buffer padding. Keep
+// float values as raw words to preserve signed zero and NaN bit patterns.
 struct uniform_setting
 {
     std::string effect;
@@ -59,9 +59,9 @@ struct settings_restore_plan
 [[nodiscard]] std::string describe_unrestored_setting(const runtime_settings &saved,
     const runtime_settings &current, const settings_restore_plan &remaining);
 
-// Access.capture refreshes its handle bindings; all writes use those indices.
-// Perform a complete compatibility check before writing anything, then verify
-// authoritative values again. An external veto must not produce a success LUT.
+// capture() refreshes the handles used by index-based writes. Check every
+// setting before changing any, then read back the result: another add-on may
+// reject a write even when the setter returns.
 template <typename Access>
 [[nodiscard]] settings_result restore_runtime_settings(const runtime_settings &saved, Access &access, std::string &error)
 {
@@ -101,9 +101,8 @@ template <typename Access>
     return settings_result::ready;
 }
 
-// An aborted/timed-out bake must retain its backup until the queued compilation
-// actually finishes. A ready catalog alone does not prove that: ReShade may not
-// have started processing the compilation request yet.
+// Keep the backup after cancellation or timeout until queued compilation ends.
+// The catalog may still be available before ReShade starts processing the queue.
 class settings_backup
 {
 public:
@@ -120,8 +119,8 @@ public:
     [[nodiscard]] bool pending() const noexcept { return pending_; }
     [[nodiscard]] bool can_restore(const std::uint64_t generation) const noexcept { return pending_ && generation > generation_; }
     [[nodiscard]] const runtime_settings &saved() const { return *saved_; }
-    // A reentrant preset/reload callback can discard the owner's backup while
-    // a public settings setter is running. Keep that data alive for unwinding.
+    // A settings setter may trigger a preset/reload callback that clears the
+    // backup. Hold a shared reference so data still in use is not freed.
     [[nodiscard]] std::shared_ptr<const runtime_settings> retain() const noexcept { return saved_; }
 
 private:

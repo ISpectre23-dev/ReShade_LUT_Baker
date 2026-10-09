@@ -32,7 +32,7 @@ struct quantization_metrics
     double source_maximum = 0.0;
     std::size_t clipped_components = 0;
     std::size_t clipped_samples = 0;
-    // Against the policy-adjusted float input, not the unclipped input or ideal lattice.
+    // Measure against the float input after any clamping, not the ideal lattice.
     error_metrics quantization;
 };
 

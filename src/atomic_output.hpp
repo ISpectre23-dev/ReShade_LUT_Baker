@@ -7,8 +7,8 @@
 
 namespace lut_baker
 {
-// Serializers share only filesystem handling, not sample processing. The
-// callback and all filesystem work run on the CPU writer, never per frame.
+// Write to a temporary file in the destination directory, then rename it.
+// This keeps partial files out of the destination if writing fails.
 [[nodiscard]] bool write_file_atomic(const std::filesystem::path &destination, bool overwrite,
     const std::function<bool(std::ostream &, std::string &)> &serialize, std::string &error);
 }

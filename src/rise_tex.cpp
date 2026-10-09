@@ -28,7 +28,7 @@ bool serialize_rise_tex(const std::uint32_t size, const std::vector<float4> &sam
     metrics.source_minimum = std::numeric_limits<double>::infinity();
     metrics.source_maximum = -std::numeric_limits<double>::infinity();
     // Validate the complete buffer before producing any bytes. Alpha is not
-    // baked into this profile: it is always 255, irrespective of shader alpha.
+    // baked into this profile: it is always 255, regardless of shader alpha.
     for (std::size_t index = 0; index < samples.size(); ++index)
     {
         const float rgb[] = { samples[index].r, samples[index].g, samples[index].b };

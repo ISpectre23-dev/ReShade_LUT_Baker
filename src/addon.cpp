@@ -43,6 +43,10 @@ using namespace reshade::api;
 using lut_baker::technique_key;
 using lut_baker::technique_selection;
 
+// -----------------------------------------------------------------------------
+// Runtime state and shared data
+// -----------------------------------------------------------------------------
+
 constexpr std::chrono::seconds gpu_submission_timeout { 30 };
 constexpr std::uint64_t gpu_wait_timeout_ns = 30'000'000'000ull;
 
@@ -123,6 +127,7 @@ struct runtime_state
 {
     explicit runtime_state(effect_runtime *value) : runtime(value) {}
 
+    // ReShade API calls can invoke this runtime's callbacks before returning.
     std::recursive_mutex mutex;
     effect_runtime *runtime = nullptr;
     bool destroyed = false;
@@ -151,8 +156,8 @@ struct runtime_state
     lut_baker::png_bit_depth last_png_depth = lut_baker::png_bit_depth::eight;
 
     bool export_pending = false;
+    // Keep both snapshots fixed until the GPU bake and CPU writer finish.
     technique_selection requested;
-    // Immutable until the current bake AND its writer have finished.
     lut_baker::export_request request;
     std::chrono::steady_clock::time_point request_started {};
     std::uint32_t attempts = 0;
@@ -185,6 +190,10 @@ struct runtime_state
 
 std::mutex s_states_mutex;
 std::unordered_map<effect_runtime *, std::shared_ptr<runtime_state>> s_states;
+
+// -----------------------------------------------------------------------------
+// Runtime metadata and technique catalog
+// -----------------------------------------------------------------------------
 
 std::shared_ptr<runtime_state> find_state(effect_runtime *runtime)
 {
@@ -321,8 +330,8 @@ bool refresh_catalog(runtime_state &state)
     if (!reconciliation.accepted)
         return false;
 
-    // This is the editable selection for future exports. Never reconcile
-    // 'requested', which is the immutable snapshot of an active bake.
+    // Update the selection for future exports, but leave requested unchanged
+    // while a bake is in progress.
     state.selected = std::move(reconciliation.selected);
     state.techniques = std::move(refreshed);
     state.catalog_dirty = false;
@@ -341,6 +350,10 @@ std::string current_preset_path(effect_runtime *runtime)
         result.pop_back();
     return result;
 }
+
+// -----------------------------------------------------------------------------
+// Live settings capture and restoration
+// -----------------------------------------------------------------------------
 
 // This adapter only reads/writes public CPU-side settings. It never saves a
 // preset, changes preprocessor definitions or accesses GPU resources.
@@ -512,10 +525,16 @@ private:
     std::vector<effect_technique> techniques_;
 };
 
+// -----------------------------------------------------------------------------
+// GPU resources and submission
+// -----------------------------------------------------------------------------
+
 bool release_gpu_resources(gpu_resources &gpu, const bool teardown_after_runtime_idle = false)
 {
     if (gpu.owner != nullptr)
     {
+        // If signaling failed, we cannot tell whether the GPU has finished.
+        // Keep the resources until runtime teardown has made the queue idle.
         if (gpu.synchronization_failed && !teardown_after_runtime_idle)
         {
             log_message(reshade::log::level::error, "GPU synchronization failed; resource handles remain quarantined until effect-runtime teardown.");
@@ -691,6 +710,10 @@ bool ensure_gpu_resources(runtime_state &state, std::string &error)
     return false;
 }
 
+// -----------------------------------------------------------------------------
+// Bake failure, cancellation and settings recovery
+// -----------------------------------------------------------------------------
+
 void set_failure(runtime_state &state, const std::string &message)
 {
     if (!state.settings_backup.pending())
@@ -751,7 +774,7 @@ void restore_settings_when_ready(runtime_state &state)
         error = exception.what();
     }
     if (!state.settings_backup.pending() || state.settings_backup.retain() != saved)
-        return; // A reentrant context-change callback already cancelled recovery.
+        return; // A callback changed the preset or effects and cancelled recovery.
     if (result == lut_baker::settings_result::waiting)
         return; // Retain the backup if restoring an enabled state queued creation.
     state.settings_backup.clear();
@@ -769,9 +792,8 @@ void restore_settings_when_ready(runtime_state &state)
 
 void check_bake_timeout(runtime_state &state)
 {
-    // Check independently of the submission/reload branches (and from the UI
-    // too, if this runtime stops receiving matching finish_present callbacks).
-    // A validated CPU writer is intentionally outside the compilation deadline.
+    // Check from the UI too, in case finish_present stops arriving for this runtime.
+    // The timeout applies to the bake, not the subsequent file write.
     if (state.export_pending && !state.writer_pending &&
         state.bake_control.timed_out(std::chrono::steady_clock::now()))
     {
@@ -801,7 +823,8 @@ void abort_export(runtime_state &state)
     else
         state.settings_backup.clear();
     state.last_duration_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - state.request_started).count();
-    // Leave request/requested and all submission/fence/resource state intact.
+    // Leave the request and the submission, fence and resource state alone:
+    // submitted GPU work still has to drain before they can be reused.
     log_message(reshade::log::level::info, state.status + ". " + state.detail);
 }
 
@@ -812,6 +835,7 @@ bool resolve_requested_techniques(
 {
     ordered.clear();
     technique_selection found;
+    // Walk the catalog in runtime order; the requested set has no defined order.
     for (const technique_entry &entry : state.techniques)
     {
         if (lut_baker::selection_contains_exact(state.requested, entry.key))
@@ -836,6 +860,10 @@ bool resolve_requested_techniques(
     return false;
 }
 
+// -----------------------------------------------------------------------------
+// Completed GPU readback and CPU file export
+// -----------------------------------------------------------------------------
+
 bool readback_samples(runtime_state &state, std::vector<lut_baker::float4> &samples, std::string &error)
 {
     device *const device = state.gpu.owner;
@@ -859,6 +887,8 @@ bool readback_samples(runtime_state &state, std::vector<lut_baker::float4> &samp
     std::size_t output_index = 0;
     const auto *const base = static_cast<const std::uint8_t *>(mapped.data);
 
+    // Mapped rows may contain alignment padding; use the returned pitch rather
+    // than treating the texture as a contiguous array of pixels.
     for (std::uint32_t y = 0; y < state.gpu.height && output_index < sample_count; ++y)
     {
         const std::uint8_t *const row = base + static_cast<std::size_t>(mapped.row_pitch) * y;
@@ -934,8 +964,8 @@ export_result execute_export_job(export_job job) noexcept
         }
         if (job.request.format != lut_baker::output_format::cube)
             result.verified_techniques = std::move(job.metadata.techniques);
-        // Directory/name were snapshotted at queue time. Collision checks and
-        // serialization are CPU-only; never access the runtime from here.
+        // Use the directory and name saved when the export was queued.
+        // This worker checks file names and writes samples without runtime calls.
         result.output = lut_baker::make_unique_output_path(job.request.directory, job.request.filename, job.request.format);
         if (result.output.empty())
         {
@@ -1037,6 +1067,8 @@ void start_export_writer(runtime_state &state, const std::vector<technique_key> 
 
     try
     {
+        // The worker owns its samples and metadata; it must not access runtime
+        // handles or mutable UI state after being launched.
         state.writer_future = std::async(std::launch::async, execute_export_job, std::move(job));
         state.writer_pending = true;
         state.phase = operation_phase::writing;
@@ -1126,7 +1158,10 @@ bool poll_export_writer(runtime_state &state)
     return true;
 }
 
-// Submit, compilation and fence polling share one stable progress label.
+// -----------------------------------------------------------------------------
+// Bake scheduling and execution verification
+// -----------------------------------------------------------------------------
+
 void set_compile_progress(runtime_state &state)
 {
     if (state.bake_control.initializing())
@@ -1222,7 +1257,7 @@ void process_bake(runtime_state &state, command_queue *present_queue)
     }
 
     // Enumeration is empty while ReShade is loading. Refresh before touching
-    // handles on EACH real attempt, including the post-compilation verification.
+    // handles on every attempt, including post-compilation verification.
     if (!refresh_catalog(state))
     {
         state.phase = operation_phase::compiling;
@@ -1301,6 +1336,8 @@ void process_bake(runtime_state &state, command_queue *present_queue)
         return;
     }
 
+    // Restart from identity on every attempt so a compilation retry cannot
+    // apply the already-rendered prefix of the chain twice.
     command_list->barrier(state.gpu.target, resource_usage::render_target, resource_usage::copy_dest);
     command_list->copy_texture_region(state.gpu.identity, 0, nullptr, state.gpu.target, 0, nullptr);
     command_list->barrier(state.gpu.target, resource_usage::copy_dest, resource_usage::render_target);
@@ -1446,6 +1483,10 @@ void begin_export(runtime_state &state)
     log_message(reshade::log::level::info, "Queued " + std::string(lut_baker::output_format_name(state.request.format)) +
         " " + std::to_string(state.request.lattice_size) + "^3 bake of " + std::to_string(state.requested.size()) + " technique(s).");
 }
+
+// -----------------------------------------------------------------------------
+// Runtime lifecycle and effect callbacks
+// -----------------------------------------------------------------------------
 
 void update_source_snapshot(runtime_state &state, swapchain *swapchain)
 {
@@ -1594,8 +1635,8 @@ bool on_set_technique_state(effect_runtime *runtime, effect_technique, bool)
         return false;
 
     std::lock_guard<std::recursive_mutex> lock(state->mutex);
-    // This is a cancellable before-change event. Another add-on can still veto
-    // the requested state, so query authoritative states on the next frame.
+    // This callback runs before the change, which another add-on may reject.
+    // Read the actual technique states on the next frame.
     state->catalog_dirty = true;
     return false;
 }
@@ -1611,8 +1652,12 @@ bool on_reorder_techniques(effect_runtime *runtime, std::size_t, effect_techniqu
     return false;
 }
 
-// Semantic colors stay fixed so success/warning/error read the same in every
-// ReShade theme; everything else is taken from the active ImGui style.
+// -----------------------------------------------------------------------------
+// Add-on overlay
+// -----------------------------------------------------------------------------
+
+// Keep success, warning and error colors consistent across ReShade themes.
+// Use the active ImGui style for the rest of the panel.
 const ImVec4 color_success(0.40f, 0.85f, 0.50f, 1.0f);
 const ImVec4 color_warning(1.00f, 0.72f, 0.25f, 1.0f);
 const ImVec4 color_error(1.00f, 0.42f, 0.36f, 1.0f);
@@ -1634,7 +1679,6 @@ std::string lattice_label(const std::uint32_t size)
     return std::to_string(size) + 'x' + std::to_string(size) + 'x' + std::to_string(size);
 }
 
-// Small filled circle aligned with the current text line.
 void status_dot(const ImVec4 &color, const char *tooltip = nullptr)
 {
     const float size = ImGui::GetFontSize() * 0.5f;
@@ -1647,9 +1691,8 @@ void status_dot(const ImVec4 &color, const char *tooltip = nullptr)
         ImGui::SetItemTooltip("%s", tooltip);
 }
 
-// Project mark: a hexagonal cube with a glowing triangular cut. It is drawn from plain polygons, so it needs
-// no texture and stays sharp at any UI scale. The geometry follows docs/images/mark.svg, a 200 unit tall
-// hexagon centered on the origin.
+// Polygon coordinates follow docs/images/mark.svg: a 200-unit-high hexagon
+// centered on the origin. Scaling the geometry avoids a separate logo texture.
 ImVec2 mark_size(const float height)
 {
     return ImVec2(height * 0.866f, height);
@@ -1660,14 +1703,15 @@ void draw_mark(ImDrawList *draw_list, const ImVec2 &top_left, const float height
     const float scale = height / 200.0f;
     const ImVec2 center(top_left.x + 86.6f * scale, top_left.y + 100.0f * scale);
     const auto point = [&](const float x, const float y) { return ImVec2(center.x + x * scale, center.y + y * scale); };
-    // GetColorU32 also applies the style alpha, so the mark fades together with disabled items.
+    // GetColorU32 also applies the style alpha, so the mark fades together
+    // with disabled items.
     const auto color = [](const std::uint32_t rgb) {
         return ImGui::GetColorU32(ImVec4(
             static_cast<float>((rgb >> 16) & 0xFF) / 255.0f, static_cast<float>((rgb >> 8) & 0xFF) / 255.0f,
             static_cast<float>(rgb & 0xFF) / 255.0f, 1.0f));
     };
 
-    // The full hexagon goes first so the antialiased faces leave no seams between them.
+    // Fill the silhouette first so face antialiasing does not expose the background.
     const ImVec2 hexagon[] = { point(0.0f, -100.0f), point(86.6f, -50.0f), point(86.6f, 50.0f), point(0.0f, 100.0f), point(-86.6f, 50.0f), point(-86.6f, -50.0f) };
     const ImVec2 top_face[] = { point(0.0f, -100.0f), point(86.6f, -50.0f), point(50.23f, -29.0f), point(-50.23f, -29.0f), point(-86.6f, -50.0f) };
     const ImVec2 left_face[] = { point(-86.6f, -50.0f), point(-50.23f, -29.0f), point(0.0f, 58.0f), point(0.0f, 100.0f), point(-86.6f, 50.0f) };
@@ -1680,8 +1724,9 @@ void draw_mark(ImDrawList *draw_list, const ImVec2 &top_left, const float height
     const ImVec2 rim[] = { point(-86.6f, -50.0f), point(0.0f, -100.0f), point(86.6f, -50.0f) };
     draw_list->AddPolyline(rim, static_cast<int>(std::size(rim)), color(0x66666F), ImDrawFlags_None, std::max(1.0f, 1.5f * scale));
 
-    // The cut is a vertical gradient. A flat antialiased triangle underneath smooths the edges of the
-    // gradient bands, which are raw primitives without antialiasing.
+    // The cut is a vertical gradient. A flat antialiased triangle underneath
+    // smooths the edges of the gradient bands, which are raw primitives
+    // without antialiasing.
     draw_list->AddTriangleFilled(point(-50.23f, -29.0f), point(50.23f, -29.0f), point(0.0f, 58.0f), color(0xFF6A1A));
     struct gradient_stop { float offset; std::uint32_t rgb; };
     const gradient_stop stops[] = { { 0.0f, 0xFFE7B0 }, { 0.26f, 0xFFB547 }, { 0.6f, 0xFF6A1A }, { 1.0f, 0xB8200E } };
@@ -1722,7 +1767,6 @@ void wrapped_bullet(const char *text)
     ImGui::TextWrapped("%s", text);
 }
 
-// Left-aligned label column shared by every field so the form lines up.
 float field_label_width()
 {
     return ImGui::CalcTextSize("File name").x + ImGui::GetFontSize() * 1.5f;
@@ -1769,7 +1813,7 @@ void draw_header(const runtime_state &state)
     else
         ImGui::TextDisabled("waiting for presentation");
 
-    // Signature at the right end of the row: version and mark. It is skipped when the row is too narrow.
+    // Omit the signature when it would overlap the buffer description.
     const char *const version = "v" LUT_BAKER_VERSION_STRING;
     const ImVec2 mark = mark_size(ImGui::GetTextLineHeight());
     const float spacing = ImGui::GetFontSize() * 0.5f;
@@ -1920,7 +1964,7 @@ void draw_technique_list(runtime_state &state)
     }
 }
 
-// List common formats first, then game-specific targets. This list builds the dropdown.
+// Keep common formats before game-specific formats in the shared UI list.
 struct output_format_option
 {
     lut_baker::output_format format;
@@ -2360,6 +2404,10 @@ void draw_overlay(effect_runtime *runtime)
 
     draw_result(*state);
 }
+
+// -----------------------------------------------------------------------------
+// Add-on registration
+// -----------------------------------------------------------------------------
 
 void register_callbacks()
 {

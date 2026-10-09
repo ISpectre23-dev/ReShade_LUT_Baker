@@ -49,6 +49,8 @@ std::pair<std::uint32_t, std::uint32_t> choose_lattice_layout(const std::uint32_
     while (factor > 1 && sample_count % factor != 0)
         --factor;
 
+    // Exact factors avoid padding samples; start near the square root to keep
+    // the texture as close to square as the sample count permits.
     const std::uint64_t other = sample_count / factor;
     if (other > std::numeric_limits<std::uint32_t>::max())
         return { 0, 0 };
@@ -71,6 +73,7 @@ std::vector<float4> make_identity_lattice(
     std::vector<float4> pixels(static_cast<std::size_t>(width) * height);
     const float denominator = static_cast<float>(size - 1);
 
+    // Red varies fastest, followed by green and blue, matching CUBE data order.
     std::size_t index = 0;
     for (std::uint32_t blue = 0; blue < size; ++blue)
     {
@@ -160,6 +163,7 @@ std::uint16_t float_to_half(const float value) noexcept
 
         std::uint32_t subnormal = mantissa | 0x800000u;
         const int shift = 14 - half_exponent;
+        // Round to nearest, ties to even, including half subnormal values.
         const std::uint32_t rounding = (1u << (shift - 1)) - 1u + ((subnormal >> shift) & 1u);
         subnormal = (subnormal + rounding) >> shift;
         return static_cast<std::uint16_t>(sign | subnormal);
@@ -246,6 +250,7 @@ bool write_cube_atomic(
     }
 
     return write_file_atomic(destination, overwrite, [&](std::ostream &stream, std::string &) {
+        // CUBE requires decimal points regardless of the process locale.
         stream.imbue(std::locale::classic());
         stream << "# ReShade LUT Baker\n";
         write_comment(stream, "Exporter version", metadata.exporter_version);
@@ -264,6 +269,7 @@ bool write_cube_atomic(
         stream << "LUT_3D_SIZE " << size << '\n';
         stream << "DOMAIN_MIN 0.0 0.0 0.0\n";
         stream << "DOMAIN_MAX 1.0 1.0 1.0\n\n";
+        // Keep enough significant digits to round-trip each binary32 sample.
         stream << std::setprecision(std::numeric_limits<float>::max_digits10) << std::defaultfloat;
 
         for (std::size_t index = 0; index < expected_count; ++index)

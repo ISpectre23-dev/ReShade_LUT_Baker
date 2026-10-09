@@ -38,8 +38,8 @@ struct export_preferences
     png_bit_depth png_depth = png_bit_depth::eight;
 };
 
-// Captured once at queue time. GPU allocation, readback and the CPU worker
-// must consume this snapshot, never the editable preferences above.
+// Save these settings when the export is queued. GPU allocation, readback and
+// the file writer all use the same snapshot, not the editable preferences.
 struct export_request
 {
     output_format format = output_format::cube;
